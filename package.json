@@ -21,19 +21,19 @@
     "wahoo"
   ],
   "scripts": {
-    "audit:fix": "npm audit fix && cd ./appcore/ && npm audit fix && cd ../desktop/ && npm audit fix && cd ../webextension/ && npm audit fix",
-    "clean": "node ./node_modules/del-cli/cli.js ./dist/ ./package/ && cd ./desktop/ && npm run clean && cd ../webextension/ && npm run clean",
+    "audit:fix": "npm audit fix && cd ./appcore/ && npm audit fix && cd ../desktop/ && npm audit fix",
+    "clean": "node ./node_modules/del-cli/cli.js ./dist/ ./package/ && cd ./desktop/ && npm run clean",
     "validate:desktop": "npm run type:check:desktop && npm run clean && cd ./appcore/ && npm test && cd ../desktop/ && npm test && npm run build:prod",
-    "postinstall": "cd webextension/ && npm install && cd ../appcore/ && npm install && cd ../desktop/ && npm install",
+    "postinstall": "cd appcore/ && npm install && cd ../desktop/ && npm install",
     "prettier": "prettier --write .",
     "upgrade:check": "ncu",
     "upgrade:apply": "npm run upgrade:check -- -u",
-    "test": "npm run clean && cd ./desktop/ && npm test && cd ../appcore/ && npm test && cd ../webextension/ && npm test",
+    "test": "npm run clean && cd ./desktop/ && npm test && cd ../appcore/ && npm test",
     "type:check:desktop": "cd ./appcore/ && npm run type:check && cd ../desktop/ && npm run type:check",
-    "type:check:extension": "cd ./appcore/ && npm run type:check && cd ../webextension/ && npm run type:check",
+    "type:check:extension": "cd ./appcore/ && npm run type:check",
     "wipe": "npm run clean && npm run wipe:package-locks && npm run wipe:node-modules",
-    "wipe:node-modules": "node ./node_modules/del-cli/cli.js ./node_modules/ ./appcore/node_modules/ ./desktop/node_modules/ ./webextension/node_modules/",
-    "wipe:package-locks": "node ./node_modules/del-cli/cli.js ./package-lock.json ./appcore/package-lock.json ./desktop/package-lock.json ./webextension/package-lock.json",
+    "wipe:node-modules": "node ./node_modules/del-cli/cli.js ./node_modules/ ./appcore/node_modules/ ./desktop/node_modules/",
+    "wipe:package-locks": "node ./node_modules/del-cli/cli.js ./package-lock.json ./appcore/package-lock.json ./desktop/package-lock.json",
     "prepare": "husky"
   },
   "config": {
@@ -55,6 +55,7 @@
   },
   "engineStrict": true,
   "devDependencies": {
+    "husky": "^9.1.7",
     "cpy-cli": "^3.1.1",
     "cross-env": "^7.0.3",
     "del-cli": "^4.0.1",
