@@ -37,6 +37,7 @@ import { DesktopWindowService } from "../../services/window/desktop-window.servi
 import { MachineService } from "../../../desktop/machine/machine.service";
 import { RuntimeInfoService } from "../../../desktop/machine/runtime-info.service";
 import { MapTokenService } from "../../../desktop/mapbox/map-token.service";
+import { SolidConnectorInfoService } from "../../services/solid-connector-info/solid-connector-info.service";
 
 @NgModule({
   imports: [CoreModule, DesktopRoutingModule],
@@ -56,6 +57,7 @@ import { MapTokenService } from "../../../desktop/mapbox/map-token.service";
     PropertiesDao,
     StravaConnectorInfoDao,
     FileConnectorInfoService,
+    SolidConnectorInfoService,
     DesktopInsightsService,
     MapTokenService,
     MachineService,
