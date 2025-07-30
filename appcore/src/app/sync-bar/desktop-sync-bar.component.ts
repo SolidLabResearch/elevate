@@ -10,6 +10,8 @@ import { SyncEventType } from "@elevate/shared/sync/events/sync-event-type";
 import { ActivitySyncEvent } from "@elevate/shared/sync/events/activity-sync.event";
 import { SyncException } from "@elevate/shared/exceptions/sync.exception";
 import { ErrorSyncEvent } from "@elevate/shared/sync/events/error-sync.event";
+import { defaultLogger } from "@angular/cdk/schematics/update-tool/logger";
+import { ActivityDiscoveredEvent } from "@elevate/shared/sync/events/activity-discovered.event";
 
 class CurrentActivitySynced {
   public date: string;
@@ -45,10 +47,6 @@ class CurrentActivitySynced {
           >
             {{ eventErrors.length }} warning{{ eventErrors.length > 1 ? "s" : "" }}
           </button>
-          <button *ngIf="isSyncing" mat-flat-button color="accent" (click)="onActionStop()" [disabled]="stopInProgress">
-            <span *ngIf="!stopInProgress">Stop</span>
-            <span *ngIf="stopInProgress">Please wait...</span>
-          </button>
           <button *ngIf="!hiddenCloseButton" mat-icon-button (click)="onActionClose()">
             <mat-icon fontSet="material-icons-outlined">close</mat-icon>
           </button>
@@ -76,6 +74,7 @@ export class DesktopSyncBarComponent extends SyncBarComponent implements OnInit 
   public isSyncing: boolean;
   public syncStatusText: string;
   public currentActivitySynced: CurrentActivitySynced;
+  public activityProcessing: number;
   public activityCounter: number;
   public eventErrors: ErrorSyncEvent[];
   public stopInProgress: boolean;
@@ -132,11 +131,12 @@ export class DesktopSyncBarComponent extends SyncBarComponent implements OnInit 
   public handleSyncEventDisplay(syncEvent: SyncEvent) {
     this.changeDetectorRef.markForCheck();
 
-    if (syncEvent.type === SyncEventType.STARTED) {
-      this.onStartedSyncEvent(syncEvent);
-    }
+    this.showSyncBar();
+    this.showCloseButton();
 
-    if (syncEvent.type === SyncEventType.ACTIVITY) {
+    if (syncEvent.type === SyncEventType.DISCOVERED_ACTIVITY) {
+      this.onActivityDiscoveredEvent(syncEvent);
+    } else if (syncEvent.type === SyncEventType.ACTIVITY) {
       this.onActivitySyncEvent(syncEvent);
     } else {
       this.currentActivitySynced = null;
@@ -154,29 +154,29 @@ export class DesktopSyncBarComponent extends SyncBarComponent implements OnInit 
       this.onStoppedSyncEvent(syncEvent);
     }
 
-    if (syncEvent.type === SyncEventType.COMPLETE) {
-      this.onCompleteSyncEvent(syncEvent);
-    }
+    this.isSyncing = this.activityProcessing > 0;
 
     this.changeDetectorRef.detectChanges();
   }
 
-  private onStartedSyncEvent(syncEvent: SyncEvent): void {
-    this.eventErrors = [];
-    this.showSyncBar();
-    this.hideCloseButton();
-    this.isSyncing = true;
-    this.resetCounter();
-    this.syncStatusText = `Sync started on connector "${syncEvent.fromConnectorType.toLowerCase()}"`;
-  }
-
   private onActivitySyncEvent(syncEvent: SyncEvent): void {
     this.activityCounter++;
+    this.activityProcessing--;
     const activitySyncEvent = syncEvent as ActivitySyncEvent;
     this.currentActivitySynced = {
       date: moment(activitySyncEvent.activity.startTime).format("ll"),
       name: activitySyncEvent.activity.name,
       isNew: activitySyncEvent.isNew
+    };
+  }
+
+  private onActivityDiscoveredEvent(syncEvent: SyncEvent): void {
+    this.activityProcessing++;
+    const activityDiscoverEvent = syncEvent as ActivityDiscoveredEvent;
+    this.currentActivitySynced = {
+      date: `Discovered activity`,
+      name: activityDiscoverEvent.activityLocation,
+      isNew: true
     };
   }
 
@@ -190,11 +190,6 @@ export class DesktopSyncBarComponent extends SyncBarComponent implements OnInit 
 
   private onStoppedSyncEvent(syncEvent: SyncEvent): void {
     this.syncStatusText = 'Sync stopped on connector "' + syncEvent.fromConnectorType.toLowerCase() + '"';
-    this.onSyncEnded();
-  }
-
-  private onCompleteSyncEvent(syncEvent: SyncEvent): void {
-    this.syncStatusText = 'Sync completed on connector "' + syncEvent.fromConnectorType.toLowerCase() + '"';
     this.onSyncEnded();
   }
 
@@ -221,5 +216,6 @@ export class DesktopSyncBarComponent extends SyncBarComponent implements OnInit 
 
   private resetCounter(): void {
     this.activityCounter = 0;
+    this.activityProcessing = 0;
   }
 }

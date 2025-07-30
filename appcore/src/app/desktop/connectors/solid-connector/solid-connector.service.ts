@@ -1,78 +1,48 @@
 import { Inject, Injectable } from "@angular/core";
 import { DesktopSyncService } from "../../../shared/services/sync/impl/desktop-sync.service";
-import { StravaConnectorInfoService } from "../../../shared/services/strava-connector-info/strava-connector-info.service";
 import { SyncService } from "../../../shared/services/sync/sync.service";
 import { ConnectorService } from "../connector.service";
 import { IPC_TUNNEL_SERVICE } from "../../ipc/ipc-tunnel-service.token";
 import { IpcTunnelService } from "@elevate/shared/electron/ipc-tunnel";
-import { IpcMessage } from "@elevate/shared/electron/ipc-message";
 import { ConnectorType } from "@elevate/shared/sync/connectors/connector-type.enum";
-import { Gender } from "@elevate/shared/models/athlete/gender.enum";
-import { StravaAccount } from "@elevate/shared/sync/strava/strava-account";
 import { StravaConnectorInfo } from "@elevate/shared/sync/connectors/strava-connector-info.model";
-import { Channel } from "@elevate/shared/electron/channels.enum";
+import { SolidConnectorInfoService } from "../../../shared/services/solid-connector-info/solid-connector-info.service";
+import { SolidConnectorInfo } from "@elevate/shared/sync/connectors/solid-connector-info.model";
 
 @Injectable()
 export class SolidConnectorService extends ConnectorService {
   constructor(
     @Inject(IPC_TUNNEL_SERVICE) public readonly ipcTunnelService: IpcTunnelService,
-    @Inject(StravaConnectorInfoService) public readonly stravaConnectorInfoService: StravaConnectorInfoService,
+    @Inject(SolidConnectorInfoService) public readonly solidConnectorInfoService: SolidConnectorInfoService,
     @Inject(SyncService) private readonly desktopSyncService: DesktopSyncService
   ) {
     super();
   }
 
-  public fetch(): Promise<StravaConnectorInfo> {
-    return this.stravaConnectorInfoService.fetch();
+  public fetch(): Promise<SolidConnectorInfo> {
+    return Promise.resolve(this.solidConnectorInfoService.fetch());
   }
 
   /**
-   * Promise updated StravaConnectorInfo with proper access & refresh token
+   * Promise updated SolidConnectorInfo with proper access & refresh token
    */
   public authenticate(): Promise<StravaConnectorInfo> {
-    let stravaConnectorInfo: StravaConnectorInfo = null;
+    let solidConnectorInfo: SolidConnectorInfo = null;
 
-    return this.fetch()
-      .then((stravaConnectorInfoFetched: StravaConnectorInfo) => {
-        stravaConnectorInfo = stravaConnectorInfoFetched;
-
-        const ipcMessage = new IpcMessage(
-          Channel.stravaLink,
-          stravaConnectorInfo.clientId,
-          stravaConnectorInfo.clientSecret,
-          stravaConnectorInfo.refreshToken
-        );
-
-        return this.ipcTunnelService.send<
-          IpcMessage,
-          { accessToken: string; refreshToken: string; expiresAt: number; athlete: any }
-        >(ipcMessage);
-      })
-      .then(result => {
-        stravaConnectorInfo.accessToken = result.accessToken;
-        stravaConnectorInfo.refreshToken = result.refreshToken;
-        stravaConnectorInfo.expiresAt = result.expiresAt;
-        stravaConnectorInfo.stravaAccount = new StravaAccount(
-          result.athlete.id,
-          result.athlete.username,
-          result.athlete.firstname,
-          result.athlete.lastname,
-          result.athlete.city,
-          result.athlete.state,
-          result.athlete.country,
-          result.athlete.sex === "M" ? Gender.MEN : Gender.WOMEN
-        );
-        return this.stravaConnectorInfoService.update(stravaConnectorInfo);
-      })
-      .catch(error => {
-        return Promise.reject(error);
-      });
+    throw new Error("not implemented yet");
   }
 
   /**
    *
    */
-  public sync(fastSync: boolean = null, forceSync: boolean = null): Promise<void> {
-    return this.desktopSyncService.sync(fastSync, forceSync, ConnectorType.STRAVA);
+  public sync(): Promise<void> {
+    return this.desktopSyncService.sync(null, null, ConnectorType.SOLID);
+  }
+
+  /**
+   *
+   */
+  public stop(): Promise<void> {
+    return this.desktopSyncService.stop();
   }
 }

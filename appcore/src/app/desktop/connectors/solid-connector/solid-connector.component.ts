@@ -61,15 +61,16 @@ export class SolidConnectorComponent extends ConnectorsComponent implements OnIn
 
   public saveChanges(): void {
     this.solidConnectorInfoService.save(this.solidConnectorInfo);
-  }
-
-  public sync(fastSync: boolean = null, forceSync: boolean = null): Promise<void> {
-    return this.solidConnectorService.sync(fastSync, forceSync).catch(err => {
-      if (err !== ConnectorsComponent.ATHLETE_CHECKING_FIRST_SYNC_MESSAGE) {
-        return Promise.reject(err);
-      }
-      return Promise.resolve();
-    });
+    this.solidConnectorService
+      .stop()
+      .then(() => {
+        this.solidConnectorService.sync().catch(err => {
+          //this.logger.error("Error starting Solid sync:", err);
+        });
+      })
+      .catch(err => {
+        //this.logger.error("Error stopping Solid sync:", err);
+      });
   }
 
   public ngOnDestroy(): void {

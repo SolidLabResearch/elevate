@@ -4,16 +4,14 @@
   </mat-card-title>
   <mat-card-subtitle *ngIf="solidConnectorInfo">
     <span *ngIf="!solidConnectorInfo.webId">Not configured. </span>
-    <span
-      *ngIf="solidConnectorInfo.webId">Configured&nbsp;➔&nbsp;<i>{{solidConnectorInfo.webId | shorten: 90: '...'}}</i></span>
+    <span *ngIf="solidConnectorInfo.webId">Configured&nbsp;➔&nbsp;<i>{{solidConnectorInfo.webId | shorten: 90:
+        '...'}}</i></span>
   </mat-card-subtitle>
   <mat-card-content>
     <div class="configureView" fxFill>
       <mat-form-field fxFill>
-        <input [(ngModel)]="solidConnectorInfo.webId" (change)="onWebidChange()"
-               matInput min="0"
-               placeholder="Enter your WebID"
-               type="text">
+        <input [(ngModel)]="solidConnectorInfo.webId" (change)="onWebidChange()" matInput min="0"
+          placeholder="Enter your WebID" type="text">
       </mat-form-field>
     </div>
   </mat-card-content>

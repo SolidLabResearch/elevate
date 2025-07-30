@@ -37,61 +37,11 @@ export class SportsLibProcessor {
     event: EventJSONInterface;
     logsInfo: string[];
   }> {
-    let parseSportsLibActivity: Promise<EventInterface> = null;
-
-    const parsingOptions = new ActivityParsingOptions({
-      streams: {
-        smooth: { altitudeSmooth: true, grade: true, gradeSmooth: true },
-        fixAbnormal: { speed: true }
-      },
-      maxActivityDurationDays: 30
-    });
-
     const srcFileType = extension(path) as FileType;
 
     const activityFileBuffer = fs.readFileSync(path);
 
-    switch (srcFileType) {
-      case FileType.GPX:
-        parseSportsLibActivity = SportsLib.importFromGPX(
-          activityFileBuffer.toString(),
-          xmldom.DOMParser,
-          parsingOptions
-        );
-        break;
-
-      case FileType.TCX:
-        const doc = new xmldom.DOMParser().parseFromString(activityFileBuffer.toString(), "application/xml");
-        parseSportsLibActivity = SportsLib.importFromTCX(doc, parsingOptions);
-        break;
-
-      case FileType.FIT:
-        parseSportsLibActivity = SportsLib.importFromFit(activityFileBuffer, parsingOptions);
-        break;
-
-      default:
-        const errorMessage = `Type ${srcFileType} not supported. Failed to parse ${path}`;
-        return Promise.reject(errorMessage);
-    }
-
-    return parseSportsLibActivity.then(eventInterface => {
-      const event = eventInterface.toJSON();
-      let logsInfo: string[] = [];
-
-      event.activities = event.activities.map(activity => {
-        // Pre process laps
-        activity.laps = this.processLaps(activity);
-
-        // Pre process streams
-        const extractedStreams = this.processStreams(activity);
-        activity.streams = extractedStreams.data;
-        logsInfo = _.union(logsInfo, extractedStreams.logsInfo);
-
-        return activity;
-      });
-
-      return Promise.resolve({ event: event, logsInfo: logsInfo });
-    });
+    return this.processString(activityFileBuffer, srcFileType);
   }
 
   private static filterSportsLibsStream(streams: StreamJSONInterface[], type: string): number[] | null {
@@ -269,6 +219,66 @@ export class SportsLibProcessor {
       }
 
       return lapObj;
+    });
+  }
+
+  public static processString(
+    activityFileBuffer: ArrayBuffer,
+    srcFileType: FileType
+  ): Promise<{
+    event: EventJSONInterface;
+    logsInfo: string[];
+  }> {
+    let parseSportsLibActivity: Promise<EventInterface> = null;
+
+    const parsingOptions = new ActivityParsingOptions({
+      streams: {
+        smooth: { altitudeSmooth: true, grade: true, gradeSmooth: true },
+        fixAbnormal: { speed: true }
+      },
+      maxActivityDurationDays: 30
+    });
+
+    switch (srcFileType) {
+      case FileType.GPX:
+        parseSportsLibActivity = SportsLib.importFromGPX(
+          activityFileBuffer.toString(),
+          xmldom.DOMParser,
+          parsingOptions
+        );
+        break;
+
+      case FileType.TCX:
+        const doc = new xmldom.DOMParser().parseFromString(activityFileBuffer.toString(), "application/xml");
+        parseSportsLibActivity = SportsLib.importFromTCX(doc, parsingOptions);
+        break;
+
+      case FileType.FIT:
+        parseSportsLibActivity = SportsLib.importFromFit(activityFileBuffer, parsingOptions);
+        break;
+
+      default:
+        const errorMessage = `Type ${srcFileType} not supported. Failed to parse activity file: ${activityFileBuffer.toString()}`;
+        return Promise.reject(errorMessage);
+    }
+
+    return parseSportsLibActivity.then(eventInterface => {
+      const event = eventInterface.toJSON();
+      let logsInfo: string[] = [];
+
+      event.activities = event.activities.map(activity => {
+        // Pre process laps
+        activity.laps = this.processLaps(activity);
+
+        // Pre process streams
+        const extractedStreams = this.processStreams(activity);
+        activity.streams = extractedStreams.data;
+        logsInfo = _.union(logsInfo, extractedStreams.logsInfo);
+
+        return activity;
+      });
+
+      return Promise.resolve({ event: event, logsInfo: logsInfo });
     });
   }
 }

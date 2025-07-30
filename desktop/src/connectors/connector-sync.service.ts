@@ -1,7 +1,5 @@
 import { container, inject, InjectionToken, singleton } from "tsyringe";
 import { BaseConnector } from "./base.connector";
-import { StravaConnector } from "./strava/strava.connector";
-import { FileConnector } from "./file/file.connector";
 import { ConnectorConfig } from "./connector-config.model";
 import { IpcSyncMessageSender } from "../senders/ipc-sync-message.sender";
 import { Logger } from "../logger";
@@ -15,12 +13,12 @@ import { AthleteModel } from "@elevate/shared/models/athlete/athlete.model";
 import { ErrorSyncEvent } from "@elevate/shared/sync/events/error-sync.event";
 import { UserSettings } from "@elevate/shared/models/user-settings/user-settings.namespace";
 import BaseUserSettings = UserSettings.BaseUserSettings;
+import { SolidConnector } from "./solid/solid.connector";
 
 @singleton()
 export class ConnectorSyncService {
   private static readonly TOKENS_MAP = new Map<ConnectorType, InjectionToken<BaseConnector>>([
-    [ConnectorType.STRAVA, StravaConnector],
-    [ConnectorType.FILE, FileConnector]
+    [ConnectorType.SOLID, SolidConnector]
   ]);
 
   public currentConnector: BaseConnector;

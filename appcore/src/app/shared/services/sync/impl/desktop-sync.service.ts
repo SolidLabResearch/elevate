@@ -42,6 +42,8 @@ import { CompleteSyncEvent } from "@elevate/shared/sync/events/complete-sync.eve
 import { UserSettings } from "@elevate/shared/models/user-settings/user-settings.namespace";
 import { MatSnackBar } from "@angular/material/snack-bar";
 import BaseUserSettings = UserSettings.BaseUserSettings;
+import { SolidConnectorInfoService } from "../../solid-connector-info/solid-connector-info.service";
+import { SolidConnectorInfo } from "@elevate/shared/sync/connectors/solid-connector-info.model";
 
 @Injectable()
 export class DesktopSyncService extends SyncService<ConnectorSyncDateTime[]> implements OnDestroy {
@@ -80,6 +82,7 @@ export class DesktopSyncService extends SyncService<ConnectorSyncDateTime[]> imp
     @Inject(IpcSyncMessageSender) public readonly ipcSyncMessageSender: IpcSyncMessageSender,
     @Inject(StravaConnectorInfoService) public readonly stravaConnectorInfoService: StravaConnectorInfoService,
     @Inject(FileConnectorInfoService) public readonly fsConnectorInfoService: FileConnectorInfoService,
+    @Inject(SolidConnectorInfoService) public readonly solidConnectorInfoService: SolidConnectorInfoService,
     @Inject(DesktopInsightsService) private readonly insightsService: DesktopInsightsService,
     @Inject(LoggerService) public readonly logger: LoggerService,
     @Inject(ConnectorSyncDateTimeDao) public readonly connectorSyncDateTimeDao: ConnectorSyncDateTimeDao,
@@ -110,6 +113,17 @@ export class DesktopSyncService extends SyncService<ConnectorSyncDateTime[]> imp
       if (notification.ended) {
         this.isSyncing$.next(false);
       }
+    });
+
+    this.sync(null, null, ConnectorType.SOLID).catch(error => {
+      if (
+        error.message ===
+        "Error invoking remote method 'startSync': Impossible to start a new sync. Another sync is already running on connector solid"
+      ) {
+        this.logger.debug("Sync already started on connector SOLID");
+        return;
+      }
+      return Promise.reject(error);
     });
   }
 
@@ -143,6 +157,8 @@ export class DesktopSyncService extends SyncService<ConnectorSyncDateTime[]> imp
       promisedDataToSync.push(this.stravaConnectorInfoService.fetch());
     } else if (this.currentConnectorType === ConnectorType.FILE) {
       promisedDataToSync.push(Promise.resolve(this.fsConnectorInfoService.fetch()));
+    } else if (this.currentConnectorType === ConnectorType.SOLID) {
+      promisedDataToSync.push(Promise.resolve(this.solidConnectorInfoService.fetch()));
     } else {
       const errorMessage = "Unknown connector type to sync";
       this.logger.error(errorMessage);
@@ -171,10 +187,12 @@ export class DesktopSyncService extends SyncService<ConnectorSyncDateTime[]> imp
         // Get timestamp on which we have to sync
         const syncFromDateTime = connectorSyncFromDateTime && fastSync ? connectorSyncFromDateTime : null;
 
+        /*
         // Display message about the sync time when fully syncing without existing activities (= first sync)
         if (!mostRecentActivity && !fastSync) {
           this.snackBar.open("This 1st synchronization may take a while, please wait...", "Ok", { duration: 10000 });
         }
+         */
 
         let startSyncParamPromise: Promise<{
           connectorType: ConnectorType;
@@ -220,6 +238,17 @@ export class DesktopSyncService extends SyncService<ConnectorSyncDateTime[]> imp
                 });
               }
             });
+        } else if (this.currentConnectorType === ConnectorType.SOLID) {
+          const solidConnectorInfo = result[4] as SolidConnectorInfo;
+
+          // Create message to start sync on connector!
+          startSyncParamPromise = Promise.resolve({
+            connectorType: this.currentConnectorType,
+            connectorInfo: solidConnectorInfo,
+            athleteModel: athleteModel,
+            userSettings: userSettings,
+            syncFromDateTime: syncFromDateTime
+          });
         }
 
         // Trigger sync start
@@ -242,7 +271,6 @@ export class DesktopSyncService extends SyncService<ConnectorSyncDateTime[]> imp
             },
             error => {
               // e.g. Impossible to start a new sync. Another sync is already running on connector ...
-              this.logger.error(error);
               return Promise.reject(error);
             }
           );
@@ -257,6 +285,10 @@ export class DesktopSyncService extends SyncService<ConnectorSyncDateTime[]> imp
 
       case SyncEventType.ACTIVITY:
         this.handleActivityUpsert(syncEvents$, syncEvent as ActivitySyncEvent);
+        break;
+
+      case SyncEventType.DISCOVERED_ACTIVITY:
+        syncEvents$.next(syncEvent); // Forward for upward UI use.
         break;
 
       case SyncEventType.STOPPED:

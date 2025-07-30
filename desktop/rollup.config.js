@@ -83,6 +83,17 @@ module.exports = [
     plugins: plugins
   },
   {
+    input: "./src/workers/sports-lib-solid.worker.ts",
+    external: ["worker_threads", "fs"],
+    output: [
+      {
+        file: "./dist/workers/sports-lib-solid.worker.js",
+        format: "cjs"
+      }
+    ],
+    plugins: plugins
+  },
+  {
     input: "./src/workers/activity-compute.worker.ts",
     external: ["worker_threads", "crypto"],
     output: [
