@@ -16,6 +16,7 @@ import { SolidConnectorService } from "./solid-connector.service";
 import { SolidConnectorInfo } from "@elevate/shared/sync/connectors/solid-connector-info.model";
 import { ConnectorType } from "@elevate/shared/sync/connectors/connector-type.enum";
 import { SolidConnectorInfoService } from "../../../shared/services/solid-connector-info/solid-connector-info.service";
+import { LoggerService } from "../../../shared/services/logging/logger.service";
 
 @Component({
   selector: "app-solid-connector",
@@ -36,7 +37,8 @@ export class SolidConnectorComponent extends ConnectorsComponent implements OnIn
     @Inject(ElectronService) protected readonly electronService: ElectronService,
     @Inject(Router) protected readonly router: Router,
     @Inject(MatSnackBar) protected readonly snackBar: MatSnackBar,
-    @Inject(MatDialog) protected readonly dialog: MatDialog
+    @Inject(MatDialog) protected readonly dialog: MatDialog,
+    @Inject(LoggerService) protected readonly logger: LoggerService
   ) {
     super(desktopSyncService, openResourceResolver, router, dialog);
     this.connectorType = ConnectorType.SOLID;
@@ -65,11 +67,11 @@ export class SolidConnectorComponent extends ConnectorsComponent implements OnIn
       .stop()
       .then(() => {
         this.solidConnectorService.sync().catch(err => {
-          //this.logger.error("Error starting Solid sync:", err);
+          this.logger.error("Error starting Solid sync:", err);
         });
       })
       .catch(err => {
-        //this.logger.error("Error stopping Solid sync:", err);
+        this.logger.error("Error stopping Solid sync:", err);
       });
   }
 
