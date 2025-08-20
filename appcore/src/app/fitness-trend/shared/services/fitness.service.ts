@@ -28,128 +28,170 @@ export class FitnessService {
   ): Promise<FitnessPreparedActivityModel[]> {
     return new Promise(
       (resolve: (result: FitnessPreparedActivityModel[]) => void, reject: (error: AppError) => void) => {
-        return this.activityService.fetch().then((activities: Activity[]) => {
-          // Check if provided activities are not empty
-          if (_.isEmpty(activities) || activities.length === 0) {
-            reject(new AppError(AppError.FT_NO_ACTIVITIES, "No activities available to generate the fitness trend"));
-          }
-
-          activities = this.filterActivities(
-            activities,
-            fitnessTrendConfigModel.ignoreBeforeDate,
-            fitnessTrendConfigModel.ignoreActivityNamePatterns
-          );
-
-          // Check if activities filtered are not empty
-          if (_.isEmpty(activities) || activities.length === 0) {
-            reject(
-              new AppError(
-                AppError.FT_ALL_ACTIVITIES_FILTERED,
-                "No activities available. They all have been filtered. Unable to generate the fitness trend."
-              )
-            );
-          }
-
-          const fitnessPreparedActivities: FitnessPreparedActivityModel[] = [];
-
-          _.forEach(activities, (activity: Activity) => {
-            if (!_.isEmpty(skipActivityTypes) && _.indexOf(skipActivityTypes, activity.type) !== -1) {
-              return;
+        const filterKeys = [];
+        if (fitnessTrendConfigModel.ignoreBeforeDate) {
+          filterKeys.push({
+            key: "activity_startTime",
+            relationKeyToValue: ">=",
+            value: fitnessTrendConfigModel.ignoreBeforeDate
+          });
+        }
+        if (fitnessTrendConfigModel.ignoreActivityNamePatterns) {
+          fitnessTrendConfigModel.ignoreActivityNamePatterns.forEach(ignorePattern => {
+            filterKeys.push({
+              key: "",
+              relationKeyToValue: `CONTAINS(LCASE(?activity_name), LCASE(${ignorePattern}))`,
+              value: ""
+            });
+          });
+        }
+        return this.activityService
+          .find({
+            keys: [
+              "activity_name",
+              "activity_startTime",
+              "activity_type",
+              "activity_flags",
+              "activity_stats_scores_stress_trimp",
+              "activity_stats_scores_stress_hrss",
+              "activity_athleteSnapshot_athleteSettings_cyclingFtp",
+              "activity_hasPowerMeter",
+              "activity_stats_scores_stress_pss",
+              "activity_athleteSnapshot_athleteSettings_runningFtp",
+              "activity_stats_scores_stress_rss",
+              "activity_athleteSnapshot_athleteSettings_swimFtp",
+              "activity_stats_scores_stress_sss"
+            ],
+            sort: {
+              key: "activity_startTime",
+              ascending: true
+            },
+            filterKeys: filterKeys
+          })
+          .then((activities: Activity[]) => {
+            // Check if provided activities are not empty
+            if (_.isEmpty(activities) || activities.length === 0) {
+              reject(new AppError(AppError.FT_NO_ACTIVITIES, "No activities available to generate the fitness trend"));
             }
 
-            if (!activity.athleteSnapshot) {
+            /*
+            activities = this.filterActivities(
+              activities,
+              fitnessTrendConfigModel.ignoreBeforeDate,
+              fitnessTrendConfigModel.ignoreActivityNamePatterns
+            );
+
+            // Check if activities filtered are not empty
+            if (_.isEmpty(activities) || activities.length === 0) {
               reject(
                 new AppError(
-                  AppError.FT_NO_ACTIVITY_ATHLETE_MODEL,
-                  "Some of your synced activities are missing athlete settings. To fix that check " +
-                    'your athlete settings and "clear and re-sync your activities"'
+                  AppError.FT_ALL_ACTIVITIES_FILTERED,
+                  "No activities available. They all have been filtered. Unable to generate the fitness trend."
                 )
               );
-              return;
             }
+            */
 
-            // Check for abnormal stress scores
-            const hasAbnormalHrss =
-              activity.flags?.length > 0 && activity.flags.indexOf(ActivityFlag.SCORE_HRSS_PER_HOUR_ABNORMAL) >= 0;
-            const hasAbnormalPss =
-              activity.flags?.length > 0 && activity.flags.indexOf(ActivityFlag.SCORE_PSS_PER_HOUR_ABNORMAL) >= 0;
-            const hasAbnormalRss =
-              activity.flags?.length > 0 && activity.flags.indexOf(ActivityFlag.SCORE_RSS_PER_HOUR_ABNORMAL) >= 0;
-            const hasAbnormalSss =
-              activity.flags?.length > 0 && activity.flags.indexOf(ActivityFlag.SCORE_SSS_PER_HOUR_ABNORMAL) >= 0;
+            const fitnessPreparedActivities: FitnessPreparedActivityModel[] = [];
 
-            // Check if activity is eligible to fitness computing
-            const hasHeartRateData: boolean =
-              !hasAbnormalHrss &&
-              ((activity.stats?.scores?.stress?.trimp > 0 &&
-                fitnessTrendConfigModel.heartRateImpulseMode === HeartRateImpulseMode.TRIMP) ||
-                (activity.stats?.scores?.stress?.hrss > 0 &&
-                  fitnessTrendConfigModel.heartRateImpulseMode === HeartRateImpulseMode.HRSS));
-
-            const hasPowerData: boolean =
-              !hasAbnormalPss &&
-              Activity.isRide(activity.type, true) &&
-              powerMeterEnable &&
-              fitnessTrendConfigModel.heartRateImpulseMode !== HeartRateImpulseMode.TRIMP &&
-              activity.athleteSnapshot.athleteSettings.cyclingFtp > 0 &&
-              (activity.hasPowerMeter || fitnessTrendConfigModel.allowEstimatedPowerStressScore) &&
-              activity.stats?.scores?.stress?.pss > 0;
-
-            const hasRunningData: boolean =
-              !hasAbnormalRss &&
-              Activity.isRun(activity.type) &&
-              fitnessTrendConfigModel.heartRateImpulseMode !== HeartRateImpulseMode.TRIMP &&
-              activity.athleteSnapshot.athleteSettings.runningFtp > 0 &&
-              activity.stats?.scores?.stress?.rss > 0 &&
-              fitnessTrendConfigModel.allowEstimatedRunningStressScore;
-
-            const hasSwimmingData: boolean =
-              !hasAbnormalSss &&
-              swimEnable &&
-              Activity.isSwim(activity.type) &&
-              fitnessTrendConfigModel.heartRateImpulseMode !== HeartRateImpulseMode.TRIMP &&
-              activity.athleteSnapshot.athleteSettings.swimFtp > 0 &&
-              activity.stats?.scores?.stress?.sss > 0;
-
-            const momentStartTime: Moment = moment(activity.startTime);
-
-            const fitnessReadyActivity: FitnessPreparedActivityModel = {
-              id: activity.id,
-              date: momentStartTime.toDate(),
-              timestamp: momentStartTime.toDate().getTime(),
-              dayOfYear: momentStartTime.dayOfYear(),
-              year: momentStartTime.year(),
-              type: activity.type,
-              hasPowerMeter: activity.hasPowerMeter,
-              name: activity.name,
-              athleteSnapshot: activity.athleteSnapshot
-            };
-
-            if (hasHeartRateData) {
-              if (fitnessTrendConfigModel.heartRateImpulseMode === HeartRateImpulseMode.TRIMP) {
-                fitnessReadyActivity.trainingImpulseScore = activity.stats.scores.stress.trimp;
-              } else if (fitnessTrendConfigModel.heartRateImpulseMode === HeartRateImpulseMode.HRSS) {
-                fitnessReadyActivity.heartRateStressScore = activity.stats.scores.stress.hrss;
+            _.forEach(activities, (activity: Activity) => {
+              if (!_.isEmpty(skipActivityTypes) && _.indexOf(skipActivityTypes, activity.type) !== -1) {
+                return;
               }
-            }
 
-            if (hasPowerData) {
-              fitnessReadyActivity.powerStressScore = activity.stats.scores.stress.pss;
-            }
+              if (!activity.athleteSnapshot) {
+                reject(
+                  new AppError(
+                    AppError.FT_NO_ACTIVITY_ATHLETE_MODEL,
+                    "Some of your synced activities are missing athlete settings. To fix that check " +
+                      'your athlete settings and "clear and re-sync your activities"'
+                  )
+                );
+                return;
+              }
 
-            if (hasRunningData) {
-              fitnessReadyActivity.runningStressScore = activity.stats.scores.stress.rss;
-            }
+              // Check for abnormal stress scores
+              const hasAbnormalHrss =
+                activity.flags?.length > 0 && activity.flags.indexOf(ActivityFlag.SCORE_HRSS_PER_HOUR_ABNORMAL) >= 0;
+              const hasAbnormalPss =
+                activity.flags?.length > 0 && activity.flags.indexOf(ActivityFlag.SCORE_PSS_PER_HOUR_ABNORMAL) >= 0;
+              const hasAbnormalRss =
+                activity.flags?.length > 0 && activity.flags.indexOf(ActivityFlag.SCORE_RSS_PER_HOUR_ABNORMAL) >= 0;
+              const hasAbnormalSss =
+                activity.flags?.length > 0 && activity.flags.indexOf(ActivityFlag.SCORE_SSS_PER_HOUR_ABNORMAL) >= 0;
 
-            if (hasSwimmingData) {
-              fitnessReadyActivity.swimStressScore = activity.stats.scores.stress.sss;
-            }
+              // Check if activity is eligible to fitness computing
+              const hasHeartRateData: boolean =
+                !hasAbnormalHrss &&
+                ((activity.stats?.scores?.stress?.trimp > 0 &&
+                  fitnessTrendConfigModel.heartRateImpulseMode === HeartRateImpulseMode.TRIMP) ||
+                  (activity.stats?.scores?.stress?.hrss > 0 &&
+                    fitnessTrendConfigModel.heartRateImpulseMode === HeartRateImpulseMode.HRSS));
 
-            fitnessPreparedActivities.push(fitnessReadyActivity);
+              const hasPowerData: boolean =
+                !hasAbnormalPss &&
+                Activity.isRide(activity.type, true) &&
+                powerMeterEnable &&
+                fitnessTrendConfigModel.heartRateImpulseMode !== HeartRateImpulseMode.TRIMP &&
+                activity.athleteSnapshot.athleteSettings.cyclingFtp > 0 &&
+                (activity.hasPowerMeter || fitnessTrendConfigModel.allowEstimatedPowerStressScore) &&
+                activity.stats?.scores?.stress?.pss > 0;
+
+              const hasRunningData: boolean =
+                !hasAbnormalRss &&
+                Activity.isRun(activity.type) &&
+                fitnessTrendConfigModel.heartRateImpulseMode !== HeartRateImpulseMode.TRIMP &&
+                activity.athleteSnapshot.athleteSettings.runningFtp > 0 &&
+                activity.stats?.scores?.stress?.rss > 0 &&
+                fitnessTrendConfigModel.allowEstimatedRunningStressScore;
+
+              const hasSwimmingData: boolean =
+                !hasAbnormalSss &&
+                swimEnable &&
+                Activity.isSwim(activity.type) &&
+                fitnessTrendConfigModel.heartRateImpulseMode !== HeartRateImpulseMode.TRIMP &&
+                activity.athleteSnapshot.athleteSettings.swimFtp > 0 &&
+                activity.stats?.scores?.stress?.sss > 0;
+
+              const momentStartTime: Moment = moment(activity.startTime);
+
+              const fitnessReadyActivity: FitnessPreparedActivityModel = {
+                id: activity.id,
+                date: momentStartTime.toDate(),
+                timestamp: momentStartTime.toDate().getTime(),
+                dayOfYear: momentStartTime.dayOfYear(),
+                year: momentStartTime.year(),
+                type: activity.type,
+                hasPowerMeter: activity.hasPowerMeter,
+                name: activity.name,
+                athleteSnapshot: activity.athleteSnapshot
+              };
+
+              if (hasHeartRateData) {
+                if (fitnessTrendConfigModel.heartRateImpulseMode === HeartRateImpulseMode.TRIMP) {
+                  fitnessReadyActivity.trainingImpulseScore = activity.stats.scores.stress.trimp;
+                } else if (fitnessTrendConfigModel.heartRateImpulseMode === HeartRateImpulseMode.HRSS) {
+                  fitnessReadyActivity.heartRateStressScore = activity.stats.scores.stress.hrss;
+                }
+              }
+
+              if (hasPowerData) {
+                fitnessReadyActivity.powerStressScore = activity.stats.scores.stress.pss;
+              }
+
+              if (hasRunningData) {
+                fitnessReadyActivity.runningStressScore = activity.stats.scores.stress.rss;
+              }
+
+              if (hasSwimmingData) {
+                fitnessReadyActivity.swimStressScore = activity.stats.scores.stress.sss;
+              }
+
+              fitnessPreparedActivities.push(fitnessReadyActivity);
+            });
+
+            resolve(fitnessPreparedActivities);
           });
-
-          resolve(fitnessPreparedActivities);
-        });
       }
     );
   }

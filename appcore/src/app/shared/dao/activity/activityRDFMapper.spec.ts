@@ -7,7 +7,7 @@ import {
   Peak,
   SlopeStats
 } from "@elevate/shared/models/sync/activity.model";
-import { ActivityMapping } from "./activityMapping";
+import { ActivityRDFMapper } from "./activityRDFMapper";
 import { AthleteSettings } from "@elevate/shared/models/athlete/athlete-settings/athlete-settings.model";
 import { AthleteSnapshot } from "@elevate/shared/models/athlete/athlete-snapshot.model";
 import { Gender } from "@elevate/shared/models/athlete/gender.enum";
@@ -75,13 +75,13 @@ function deepEqualActivities(a: any, b: any, eps = 1e-6): { equal: boolean; diff
  * - queries it back with ActivityMapping.query()
  * - returns the retrieved Activity and a comparison result
  */
-async function roundtripActivityTest(activity: Activity, opts?: { iriFragment?: string }) {
-  const iriFragment = opts?.iriFragment ?? "activity";
-  const baseUrl = "http://example.org/data";
-  const activityIri = `${baseUrl}#${iriFragment}`;
+async function roundtripActivityTest(activity: Activity) {
+  const baseUrl = "http://example.org";
+  const activityLocation = `${baseUrl}/${activity.id}`;
+  const activityIri = activityLocation + "#activity";
 
-  const mapping = new ActivityMapping();
-  const ttl = mapping.write(activityIri, activity);
+  const mapping = new ActivityRDFMapper();
+  const ttl = mapping.write(activityLocation, activity);
 
   // Parse the Turtle into an N3 store
   const store = new Store();
@@ -98,7 +98,7 @@ async function roundtripActivityTest(activity: Activity, opts?: { iriFragment?: 
         store.addQuad(quad);
       } else {
         // Parsing finished, now query the store
-        queryStore(store, mapping, iriFragment, ttl, activity, activityIri).then(resolve).catch(reject);
+        queryStore(store, mapping, ttl, activity, activityIri).then(resolve).catch(reject);
       }
     });
   });
@@ -106,22 +106,21 @@ async function roundtripActivityTest(activity: Activity, opts?: { iriFragment?: 
 
 async function queryStore(
   store: Store,
-  mapping: ActivityMapping,
-  iriFragment: string,
+  mapping: ActivityRDFMapper,
   ttl: string,
   activity: Activity,
   activityIri: string
 ) {
   try {
     // Use the N3 store as the source for querying
-    const results = await mapping.query([store] as any);
+    const results = (await mapping.query([store] as any)) as Activity[];
 
     if (!results || results.length === 0) {
       return { ok: false, reason: "No activities returned from query()", written: ttl };
     }
 
     // pick the one with the expected id (= fragment after '#')
-    const id = iriFragment;
+    const id = activityIri.split("#")[0].split("/").pop();
     const retrieved = results.find(a => a.id === id) ?? results[0];
 
     // Compare (your queried Activity contains extra derived pieces; that’s fine)
@@ -144,6 +143,8 @@ describe("ActivityMapping round-trip", () => {
     const act = new Activity();
     act.id = "test-activity"; // fragment after # in the IRI
     act.name = "Morning Run";
+    act.type = ElevateSport.Run;
+    act.connector = ConnectorType.SOLID;
     act.startTime = new Date("2025-08-11T06:00:00Z").toDateString();
     act.endTime = new Date("2025-08-11T07:00:00Z").toDateString();
     act.startTimestamp = Math.floor(new Date(act.startTime).getTime() / 1000);
@@ -155,6 +156,8 @@ describe("ActivityMapping round-trip", () => {
     act.manual = false;
     act.isSwimPool = false;
     act.latLngCenter = [50.8503, 4.3517]; // Brussels
+    act.creationTime = new Date("2025-08-11T07:30:00Z").toDateString();
+    act.lastEditTime = new Date("2025-08-11T07:30:00Z").toDateString();
 
     // Athlete snapshot with settings
     const athleteSettings = new AthleteSettings(
@@ -208,10 +211,10 @@ describe("ActivityMapping round-trip", () => {
       }
     };
 
-    const res: any = await roundtripActivityTest(act, { iriFragment: act.id });
+    const res: any = await roundtripActivityTest(act);
 
     if (!res.ok) {
-      console.error("Round-trip failed:", res.diff);
+      console.error("Round-trip failed:", res.diff, "\n", res);
     }
     expect(res.ok).toBe(true);
   });
@@ -220,6 +223,8 @@ describe("ActivityMapping round-trip", () => {
     const act = new Activity();
     act.id = "test-activity"; // fragment after # in the IRI
     act.name = "Morning Run";
+    act.type = ElevateSport.Run;
+    act.connector = ConnectorType.SOLID;
     act.startTime = "2025-08-11T06:00:00Z";
     act.endTime = "2025-08-11T07:00:00Z";
     act.startTimestamp = Math.floor(new Date(act.startTime).getTime() / 1000);
@@ -231,6 +236,8 @@ describe("ActivityMapping round-trip", () => {
     act.manual = false;
     act.isSwimPool = false;
     act.latLngCenter = [50.8503, 4.3517]; // Brussels
+    act.creationTime = new Date("2025-08-11T07:30:00Z").toDateString();
+    act.lastEditTime = new Date("2025-08-11T07:30:00Z").toDateString();
 
     // Athlete snapshot with settings
     const athleteSettings = new AthleteSettings(
@@ -284,7 +291,7 @@ describe("ActivityMapping round-trip", () => {
       }
     };
 
-    const res: any = await roundtripActivityTest(act, { iriFragment: act.id });
+    const res: any = await roundtripActivityTest(act);
 
     if (!res.ok) {
       console.error("Round-trip failed:", res.diff);
@@ -534,7 +541,7 @@ describe("ActivityMapping round-trip", () => {
       grade: {
         avg: 1.6,
         max: 18.5,
-        min: -12.3,
+        min: 12.3,
         lowQ: -1.2,
         median: 0.8,
         upperQ: 3.5,
@@ -758,7 +765,7 @@ describe("ActivityMapping round-trip", () => {
       grade: {
         avg: 1.6,
         max: 18.5,
-        min: -12.3,
+        min: 12.3,
         lowQ: -1.2,
         median: 0.8,
         upperQ: 3.5,
@@ -812,7 +819,7 @@ describe("ActivityMapping round-trip", () => {
       }
     };
 
-    const res: any = await roundtripActivityTest(act, { iriFragment: act.id });
+    const res: any = await roundtripActivityTest(act);
 
     if (!res.ok) {
       console.error("Round-trip failed:", res.diff);

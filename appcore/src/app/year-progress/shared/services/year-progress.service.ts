@@ -75,7 +75,7 @@ export class YearProgressService {
 
     // Find along types date from & to / From: 1st january of first year / To: Today
     const todayMoment = this.getTodayMoment();
-    const fromMoment: Moment = moment(_.first(activities).startTime).startOf("year"); // 1st january of first year
+    const fromMoment: Moment = moment(_.first(yearProgressActivities).startTime).startOf("year"); // 1st january of first year
     const toMoment: Moment = this.getTodayMoment().clone().endOf("year").endOf("day");
 
     return config.mode === ProgressMode.YEAR_TO_DATE

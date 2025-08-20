@@ -57,15 +57,17 @@ export class DesktopSyncService extends SyncService<ConnectorSyncDateTime[]> imp
     () => Promise<number>
   >([
     [
-      ConnectorType.STRAVA,
-      () => this.activityService.findMostRecent().then(activity => Promise.resolve(activity.startTimestamp * 1000))
-    ],
-    [
-      ConnectorType.FILE,
+      ConnectorType.SOLID,
       () =>
-        this.connectorSyncDateTimeDao
-          .findOne({ connectorType: ConnectorType.FILE })
-          .then(connector => Promise.resolve(connector.syncDateTime))
+        this.activityService
+          .find({
+            keys: ["activity.startTime", "activity_startTimestamp"],
+            sort: {
+              key: "activity.startTime",
+              ascending: true
+            }
+          })
+          .then(activities => Promise.resolve(activities[0].startTimestamp * 1000))
     ]
   ]);
 
@@ -150,7 +152,21 @@ export class DesktopSyncService extends SyncService<ConnectorSyncDateTime[]> imp
       this.athleteService.fetch(),
       this.userSettingsService.fetch(),
       fastSync ? this.CONNECTOR_SYNC_FROM_DATE_TIME_MAP.get(this.currentConnectorType)() : Promise.resolve(null),
-      this.activityService.findMostRecent()
+      this.activityService
+        .find({
+          keys: ["activity_startTime", "activity_startTimestamp"],
+          sort: {
+            key: "activity_startTime",
+            ascending: true
+          }
+        })
+        .then(activities => {
+          if (activities && activities.length > 0) {
+            return Promise.resolve(activities[0]);
+          } else {
+            return Promise.resolve(null);
+          }
+        })
     ];
 
     if (this.currentConnectorType === ConnectorType.STRAVA) {

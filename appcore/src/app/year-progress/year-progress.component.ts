@@ -235,7 +235,20 @@ export class YearProgressComponent implements OnInit, OnDestroy {
         this.hasActivities = count > 0;
 
         return this.hasActivities
-          ? Promise.all([this.userSettingsService.fetch(), this.activityService.fetch()])
+          ? Promise.all([
+              this.userSettingsService.fetch(),
+              this.activityService.find({
+                keys: [
+                  "activity_startTime",
+                  "activity_type",
+                  "activity_trainer",
+                  "activity_commute",
+                  "activity_stats_distance",
+                  "activity_stats_movingTime",
+                  "activity_stats_elevationGain"
+                ]
+              })
+            ])
           : Promise.reject(new AppError(AppError.SYNC_NOT_SYNCED, "No activities available"));
       })
       .then(

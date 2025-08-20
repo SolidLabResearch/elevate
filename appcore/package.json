@@ -40,6 +40,8 @@
     "@comunica/query-sparql-solid": "^4.0.2",
     "@elevate/shared": "file:modules/shared",
     "@iktakahiro/markdown-it-katex": "^4.0.1",
+    "@incremunica/query-sparql-incremental": "^2.3.0",
+    "@incremunica/user-tools": "^2.3.0",
     "@sentry/browser": "^7.110.0",
     "angular-plotly.js": "^4.0.4",
     "cross-fetch": "^4.1.0",

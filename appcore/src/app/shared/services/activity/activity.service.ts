@@ -29,11 +29,15 @@ export abstract class ActivityService {
     return this.activityDao.findSorted(false);
   }
 
-  public find(
-    query?: LokiQuery<Activity & LokiObj>,
-    sort?: { propName: keyof Activity; options: Partial<SimplesortOptions> }
-  ): Promise<Activity[]> {
-    return this.activityDao.find(query, sort);
+  public find(options?: {
+    keys?: string[];
+    boundKeys?: { key: string; value: string | number | Date | boolean }[];
+    filterKeys?: { key: string; relationKeyToValue: string; value: string | number | boolean | Date }[];
+    sort?: { key: string; ascending: boolean };
+    slice?: { limit: number; offset?: number };
+    type?: "select" | "count" | "ask";
+  }): Promise<Activity[]> {
+    return this.activityDao.find(options);
   }
 
   public findMostRecent(): Promise<Activity> {
@@ -43,11 +47,20 @@ export abstract class ActivityService {
   }
 
   public findByIds(ids: (number | string)[]): Promise<Activity[]> {
-    return this.activityDao.find({ id: { $in: ids } });
+    return Promise.all(ids.map(this.activityDao.getById));
   }
 
   public findSince(dateTime: number): Promise<Activity[]> {
-    return this.activityDao.find({ startTimestamp: { $gt: Math.floor(dateTime / 1000) } }); // Divide by 1000 to match the db
+    return this.activityDao.find({
+      keys: ["activity_startTime"],
+      filterKeys: [
+        {
+          key: "activity_startTime",
+          relationKeyToValue: ">",
+          value: new Date(dateTime)
+        }
+      ]
+    });
   }
 
   public findSorted(descending: boolean = false): Promise<Activity[]> {
@@ -82,34 +95,56 @@ export abstract class ActivityService {
     return this.activityDao.clear();
   }
 
-  public count(): Promise<number> {
-    return this.activityDao.count();
+  public count(options?: {
+    boundKeys?: { key: string; value: any }[];
+    filterKeys?: { key: string; relationKeyToValue: string; value: string | number | boolean | Date }[];
+  }): Promise<number> {
+    return this.activityDao.count(options);
   }
 
   public countWithConnector(): Promise<number> {
-    return this.activityDao.count({ connector: { $ne: null } });
+    return this.activityDao.count();
   }
 
   public countByType(): ActivityCountByType[] {
-    return this.activityDao
-      .chain()
-      .find()
-      .mapReduce(
-        activity => activity.type,
-        sports => {
-          const countBy = sports.reduce<{}>((results, sport: ElevateSport) => {
-            results[sport] ? results[sport]++ : (results[sport] = 1);
-            return results;
-          }, {});
-          return _.chain(countBy)
-            .toPairs()
-            .map(x => {
-              return { type: x[0], count: x[1] } as ActivityCountByType;
-            })
-            .orderBy("count", "desc")
-            .value();
-        }
-      );
+    let result = [];
+    result.push({
+      type: ElevateSport.Run,
+      count: this.activityDao.count({
+        filterKeys: [
+          {
+            key: "activity_type",
+            relationKeyToValue: "=",
+            value: ElevateSport.Run
+          }
+        ]
+      })
+    });
+    result.push({
+      type: ElevateSport.Ride,
+      count: this.activityDao.count({
+        filterKeys: [
+          {
+            key: "activity_type",
+            relationKeyToValue: "=",
+            value: ElevateSport.Ride
+          }
+        ]
+      })
+    });
+    result.push({
+      type: ElevateSport.Swim,
+      count: this.activityDao.count({
+        filterKeys: [
+          {
+            key: "activity_type",
+            relationKeyToValue: "=",
+            value: ElevateSport.Swim
+          }
+        ]
+      })
+    });
+    return result;
   }
 
   public findByDatedSession(startTime: string, endTime: string): Promise<Activity[]> {
@@ -127,7 +162,23 @@ export abstract class ActivityService {
     return this.athleteSnapshotResolver
       .update()
       .then(() => {
-        return this.activityDao.find();
+        return this.activityDao.find({
+          keys: [
+            "activity_id",
+            "activity_startTime",
+            "activity_athleteSnapshot_gender",
+            "activity_athleteSnapshot_age",
+            "activity_athleteSnapshot_athleteSettings_maxHr",
+            "activity_athleteSnapshot_athleteSettings_restHr",
+            "activity_athleteSnapshot_athleteSettings_lthr_default",
+            "activity_athleteSnapshot_athleteSettings_lthr_cycling",
+            "activity_athleteSnapshot_athleteSettings_lthr_running",
+            "activity_athleteSnapshot_athleteSettings_cyclingFtp",
+            "activity_athleteSnapshot_athleteSettings_runningFtp",
+            "activity_athleteSnapshot_athleteSettings_swimFtp",
+            "activity_athleteSnapshot_athleteSettings_weight"
+          ]
+        });
       })
       .then((activities: Activity[]) => {
         let isCompliant = true;
@@ -163,7 +214,23 @@ export abstract class ActivityService {
     return this.athleteSnapshotResolver
       .update()
       .then(() => {
-        return this.fetch();
+        return this.find({
+          keys: [
+            "activity_id",
+            "activity_startTime",
+            "activity_athleteSnapshot_gender",
+            "activity_athleteSnapshot_age",
+            "activity_athleteSnapshot_athleteSettings_maxHr",
+            "activity_athleteSnapshot_athleteSettings_restHr",
+            "activity_athleteSnapshot_athleteSettings_lthr_default",
+            "activity_athleteSnapshot_athleteSettings_lthr_cycling",
+            "activity_athleteSnapshot_athleteSettings_lthr_running",
+            "activity_athleteSnapshot_athleteSettings_cyclingFtp",
+            "activity_athleteSnapshot_athleteSettings_runningFtp",
+            "activity_athleteSnapshot_athleteSettings_swimFtp",
+            "activity_athleteSnapshot_athleteSettings_weight"
+          ]
+        });
       })
       .then((activities: Activity[]) => {
         const nonConsistentIds = [];
@@ -181,11 +248,9 @@ export abstract class ActivityService {
    * Ask to check activities having settings lacks (missing FTPs)
    */
   public verifyActivitiesWithSettingsLacking(): void {
-    this.logger.debug("checking activities with settings lacks");
     this.hasActivitiesWithSettingsLacks().then(
       hasSettingsLack => {
         this.activitiesWithSettingsLacks$.next(hasSettingsLack);
-        this.logger.debug("Activities with settings lacks: " + hasSettingsLack);
       },
       error => this.activitiesWithSettingsLacks$.error(error)
     );
