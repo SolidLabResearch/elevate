@@ -212,7 +212,7 @@ export class ActivitiesComponent implements OnInit, OnDestroy {
   }
 
   public columnsSetup(): void {
-    const existingSelectedColumns = this.getSelectedColumns();
+    const existingSelectedColumns = this.getSavedColumns();
 
     this.selectedColumns = existingSelectedColumns ? existingSelectedColumns : this.getDefaultsColumns();
 
@@ -220,7 +220,7 @@ export class ActivitiesComponent implements OnInit, OnDestroy {
     this.filterDisplayedColumns();
 
     // Check if user selected too much columns. Display warning if so
-    this.verifyTablePerformance();
+    //this.verifyTablePerformance();
 
     // Creates category of columns
     this.columnsCategories = this.createColumnsCategories(ActivityColumns.Definition.ALL);
@@ -250,40 +250,72 @@ export class ActivitiesComponent implements OnInit, OnDestroy {
 
   public findAndDisplayActivities(): void {
     // Build the query
-    // Apply default activity name regex search
-    let nameRegexPattern = _.escapeRegExp(this.preferences.activityName.trim());
-    nameRegexPattern = _.replace(nameRegexPattern, " ", ".*");
-    nameRegexPattern = `.*${nameRegexPattern}.*`;
+    let hasAthleteSettings = false;
+    const keys = this.displayedColumns
+      .filter(value => {
+        if (value === "athleteSettings") {
+          hasAthleteSettings = true;
+          return false;
+        }
+        return value !== "deleteActivity";
+      })
+      .map(value => "activity_" + value.replace(/\./gm, "_"));
 
-    const query: LokiQuery<Activity & LokiObj> = {
-      name: { $regex: [nameRegexPattern, "i"] }
-    };
+    if (hasAthleteSettings) {
+      keys.push("activity_athleteSnapshot_athleteSettings_maxHr");
+      keys.push("activity_athleteSnapshot_athleteSettings_restHr");
+      keys.push("activity_athleteSnapshot_athleteSettings_lthr_default");
+      keys.push("activity_athleteSnapshot_athleteSettings_lthr_cycling");
+      keys.push("activity_athleteSnapshot_athleteSettings_lthr_running");
+      keys.push("activity_athleteSnapshot_athleteSettings_cyclingFtp");
+      keys.push("activity_athleteSnapshot_athleteSettings_runningFtp");
+      keys.push("activity_athleteSnapshot_athleteSettings_swimFtp");
+      keys.push("activity_athleteSnapshot_athleteSettings_weight");
+    }
 
-    // Apply sports preferences if provided
+    const filterKeys = [];
+    if (this.preferences.activityName) {
+      let nameRegexPattern = _.escapeRegExp(this.preferences.activityName.trim());
+      nameRegexPattern = _.replace(nameRegexPattern, " ", ".*");
+      nameRegexPattern = `.*${nameRegexPattern}.*`;
+      filterKeys.push({
+        requiredKeys: ["activity_name"],
+        condition: `REGEX(?activity_name, "${nameRegexPattern}", "i")`
+      });
+    }
+
     if (this.preferences.sports.length) {
-      query.type = { $in: this.preferences.sports };
+      filterKeys.push({
+        requiredKeys: ["activity_type"],
+        condition: `?activity_type IN (${this.preferences.sports.map(value => `"${value}"`).join(", ")})`
+      });
     }
 
     if (this.preferences.fromDate) {
-      query.startTime = {
-        $gte: _.isDate(this.preferences.fromDate) ? this.preferences.fromDate.toISOString() : this.preferences.fromDate
-      };
+      filterKeys.push({
+        key: "activity_startTime",
+        relationKeyToValue: ">",
+        value: _.isDate(this.preferences.fromDate) ? this.preferences.fromDate : new Date(this.preferences.fromDate)
+      });
     }
 
     if (this.preferences.toDate) {
-      query.endTime = {
-        $lte: moment(this.preferences.toDate).endOf("day").toISOString()
-      };
+      filterKeys.push({
+        key: "activity_endTime",
+        relationKeyToValue: "<",
+        value: _.isDate(this.preferences.toDate) ? this.preferences.toDate : new Date(this.preferences.toDate)
+      });
     }
 
-    // Setup default sort on descending start time
-    const sort: { propName: keyof Activity; options: Partial<SimplesortOptions> } = {
-      propName: "startTime",
-      options: { desc: true }
-    };
-
     this.activityService
-      .find(query, sort)
+      .find({
+        keys: keys,
+        filterKeys: filterKeys,
+        sort: {
+          key: "activity_startTime",
+          ascending: true
+        }
+      })
       .then((activities: Activity[]) => {
         this.hasEmptyResults = activities.length === 0;
 
@@ -331,12 +363,12 @@ export class ActivitiesComponent implements OnInit, OnDestroy {
   }
 
   public onSelectedColumns(): void {
-    this.verifyTablePerformance();
-    this.filterDisplayedColumns();
-    this.saveSelectedColumns();
+    //this.verifyTablePerformance();
+    this.findAndDisplayActivities();
+    this.setSavedColumns();
   }
 
-  public getSelectedColumns(): ActivityColumns.Column[] {
+  public getSavedColumns(): ActivityColumns.Column[] {
     const savedColumns: string[] = JSON.parse(localStorage.getItem(ActivitiesComponent.LS_SELECTED_COLUMNS));
 
     let selectedColumns: ActivityColumns.Column[] = null;
@@ -356,7 +388,7 @@ export class ActivitiesComponent implements OnInit, OnDestroy {
     });
   }
 
-  public saveSelectedColumns(): void {
+  public setSavedColumns(): void {
     const columnsToBeSaved: string[] = _.map(this.selectedColumns, (column: ActivityColumns.Column) => {
       return column.id;
     });
