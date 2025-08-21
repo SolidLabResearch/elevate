@@ -237,7 +237,8 @@ PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 
     // do query
     const bindingsStream: AsyncIterator<Bindings> = await this.queryEngine.queryBindings(query, {
-      sources: [...sources, "https://solidlabresearch.github.io/activity-ontology/"]
+      sources: [...sources, "https://solidlabresearch.github.io/activity-ontology/"],
+      lenient: true
     });
 
     if (options.type === "count") {
@@ -832,7 +833,13 @@ ORDER BY ?zoneIndex
     addLit(activityIri, "activo:isManual", (activity as any).manual);
     addLit(activityIri, "activo:isSwimPool", (activity as any).isSwimPool);
     addLit(activityIri, "activo:hash", (activity as any).hash);
-    addLit(activityIri, "activo:isWithoutAthletePerformance", (activity as any).settingsLack);
+    addLit(
+      activityIri,
+      "activo:isWithoutAthletePerformance",
+      (activity as any).settingsLack === undefined || (activity as any).settingsLack === null
+        ? false
+        : (activity as any).settingsLack
+    );
     addLit(activityIri, "prov:generatedAtTime", (activity as any).creationTime);
     addLit(activityIri, "activo:notes", (activity as any).notes);
     addLit(activityIri, "activo:isTypeAutoDetected", (activity as any).autoDetectedType);
@@ -858,6 +865,8 @@ ORDER BY ?zoneIndex
       if ("age" in snap) addLit(athleteIri, "foaf:age", snap.age);
 
       const set = snap.athleteSettings as any;
+      console.log(snap);
+      console.log(set);
       if (set) {
         addLit(snapshotIri, "activo:maxHeartRate", set.maxHr);
         addLit(snapshotIri, "activo:restHeartRate", set.restHr);
@@ -1277,7 +1286,7 @@ ORDER BY ?zoneIndex
     if (device || filePath) {
       const fileIri = mint("file");
       addLink(activityIri, "prov:wasDerivedFrom", fileIri);
-      if (filePath) addLit(fileIri, "prov:atLocation", filePath);
+      if (filePath) addLink(fileIri, "prov:atLocation", filePath);
       if (device) {
         const agentIri = mint("deviceAgent");
         addLink(fileIri, "prov:wasAttributedTo", agentIri);

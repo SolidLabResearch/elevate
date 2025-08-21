@@ -260,8 +260,8 @@ export abstract class ActivityService {
     return this.activityDao.hasActivitiesWithSettingsLacks();
   }
 
-  public findActivitiesWithSettingsLacks(): Promise<Activity[]> {
-    return this.activityDao.findActivitiesWithSettingsLacks();
+  public findActivitiesWithSettingsLacks(keys?: string[]): Promise<Activity[]> {
+    return this.activityDao.findActivitiesWithSettingsLacks(keys);
   }
 
   public createManualEntry(

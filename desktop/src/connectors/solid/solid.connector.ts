@@ -88,7 +88,7 @@ import { Streams } from "@elevate/shared/models/activity-data/streams.model";
 import { StartedSyncEvent } from "@elevate/shared/sync/events/started-sync.event";
 import { DataGradeAdjustedPaceAvg } from "@thomaschampagne/sports-lib/lib/data/data.grade-adjusted-pace-avg";
 import { QueryEngine } from "@incremunica/query-sparql-incremental";
-import { isAddition } from "@incremunica/user-tools";
+import { createSourcesStreamFromBindingsStream, isAddition, QuerySourceIterator } from "@incremunica/user-tools";
 import { SportsLibSolidWorkerParams } from "../../workers/sports-lib-solid.worker";
 import fetch from "cross-fetch";
 import { AsyncIterator } from "asynciterator";
@@ -279,170 +279,243 @@ export class SolidConnector extends BaseConnector {
       this.syncEvents$.next(new StartedSyncEvent(ConnectorType.SOLID));
       this.isSyncing = true;
     }
-
     this.engine
-      .queryBindings(
-        `PREFIX ldp: <http://www.w3.org/ns/ldp#>
-SELECT ?filePath WHERE {
-  ?this ldp:contains ?filePath .
-}`,
-        {
-          sources: [this.solidConnectorConfig.info.base + "/raw-activities/"],
-          lenient: true
-        }
-      )
-      .then(bindingsStream => {
-        const activityIterator = bindingsStream
-          .map(bindings => {
-            const path = bindings.get("filePath");
-            if (path.termType !== "NamedNode") {
-              return null;
-            }
-            if (path.value.endsWith(".fit")) {
-              return { path: path.value, fileType: ActivityFileType.FIT };
-            }
-            if (path.value.endsWith(".gpx")) {
-              return { path: path.value, fileType: ActivityFileType.GPX };
-            }
-            if (path.value.endsWith(".tcx")) {
-              return { path: path.value, fileType: ActivityFileType.TCX };
-            }
+      .queryBindings(`PREFIX ldp: <http://www.w3.org/ns/ldp#> SELECT * WHERE { ?this ldp:contains ?source . }`, {
+        sources: [this.solidConnectorConfig.info.base + "/activities/"],
+        lenient: true
+      })
+      .then(sourcesStream => {
+        const rawActivitiesIRI = `${this.solidConnectorConfig.info.base}/raw-activities/`;
+        const sourcesToCalculateIterator = new AsyncIterator<string>();
+        const sourcesToCalculateBuffer = new Set<string>();
+        sourcesToCalculateIterator.readable = false;
+        sourcesToCalculateIterator.read = () => {
+          if (!sourcesToCalculateIterator.readable) {
             return null;
-          })
-          .transform({
-            maxBufferSize: SolidConnector.BUFFER_SIZE,
-            transform: (
-              data: { path: string; fileType: ActivityFileType },
-              done: () => void,
-              push: (value: {
-                responsePromise: Promise<Response>;
-                fileType: ActivityFileType;
-                location: string;
-              }) => void
-            ) => {
-              this.syncEvents$.next(new ActivityDiscoveredEvent(ConnectorType.SOLID, null, data.fileType, data.path));
-              push({ responsePromise: fetch(data.path), fileType: data.fileType, location: data.path });
-              done();
-            }
-          })
-          .transform({
-            maxBufferSize: SolidConnector.BUFFER_SIZE,
-            transform: (
-              data: { responsePromise: Promise<Response>; fileType: ActivityFileType; location: string },
-              done: () => void,
-              push: (i: {
-                sportsLibEventPromise: Promise<{ event: EventJSONInterface; logsInfo: string[] }>;
-                activitySolid: ActivitySolid;
-              }) => void
-            ) => {
-              data.responsePromise.then(async response => {
-                const activitySolid = new ActivitySolid(
-                  data.fileType,
-                  data.location,
-                  await response.arrayBuffer(),
-                  new Date(response.headers.get("last-modified"))
-                );
-                push({ sportsLibEventPromise: this.computeSportsLibEvent(activitySolid), activitySolid });
-                done();
-              });
-            }
-          })
-          .transform({
-            maxBufferSize: SolidConnector.BUFFER_SIZE,
-            transform: (
-              data: {
-                sportsLibEventPromise: Promise<{ event: EventJSONInterface; logsInfo: string[] }>;
-                activitySolid: ActivitySolid;
-              },
-              done: () => void,
-              push: (i: { activity: ActivityJSONInterface; activitySolid: ActivitySolid }) => void
-            ) => {
-              data.sportsLibEventPromise.then(result => {
-                result.logsInfo.forEach(log => this.logger.info(log));
-                for (const activity of result.event.activities) {
-                  push({ activity, activitySolid: data.activitySolid });
-                }
-                done();
-              });
-            }
-          })
-          .transform({
-            maxBufferSize: SolidConnector.BUFFER_SIZE,
-            transform: async (
-              data: { activity: ActivityJSONInterface; activitySolid: ActivitySolid },
-              done: () => void,
-              push: (
-                i: Promise<{
-                  computedActivity: Activity;
-                  deflatedStreams: string;
-                }>
-              ) => void
-            ) => {
-              const sportsLibActivity = data.activity;
-              if (sportsLibActivity && sportsLibActivity.type === ActivityTypes.Transition) {
-                done();
-              }
-
-              // Create bare activity from "sports-lib" activity
-              let activity: Partial<Activity> = this.createBareActivity(sportsLibActivity);
-
-              // Extract streams
-              const streams = this.mapStreams(sportsLibActivity);
-
-              // Set common activity properties
-              activity = this.assignBaseProperties(activity, streams);
-
-              // Assign reference to strava activity
-              activity.extras = {
-                file: {
-                  path: data.activitySolid.location,
-                  type: data.activitySolid.type
-                }
-              } as ActivityExtras;
-
-              // Resolve athlete snapshot for current activity date
-              // TODO we can do a query figuring out the athlete settings, if they change we can recalculate automatically
-              const athleteSnapshot = this.athleteSnapshotResolver.resolve(activity.startTime);
-
-              // Fetch source stats coming from files.
-              // These stats will override the computed stats to display what the user had seen on his device
-              activity.srcStats = this.getSourceStats(activity.type, sportsLibActivity, streams);
-
-              // Process laps
-              activity.laps = this.processLaps(activity.type, sportsLibActivity.laps);
-
-              // Fetch device name if exists
-              activity.device = this.fetchAndHandleDeviceName(data.activitySolid, sportsLibActivity.creator);
-
-              // Set comment to null at the moment
-              activity.notes = null;
-
-              // Compute activity
-              push(
-                this.computeActivity(activity, athleteSnapshot, this.solidConnectorConfig.userSettings, streams, true)
-              );
-              done();
-            }
-          });
-
-        this.activeIterator = activityIterator;
-        const readIterator = async () => {
-          let resultPromise = activityIterator.read();
-          while (resultPromise) {
-            try {
-              const { computedActivity, deflatedStreams } = await resultPromise;
-              this.syncEvents$.next(
-                new ActivitySyncEvent(ConnectorType.SOLID, null, computedActivity, true, deflatedStreams)
-              );
-            } catch (error) {
-              this.logger.error(error);
-            }
-            resultPromise = activityIterator.read();
           }
+          if (sourcesToCalculateBuffer.size > 0) {
+            const value: string = sourcesToCalculateBuffer.values().next().value;
+            sourcesToCalculateBuffer.delete(value);
+            this.logger.info(`Returning source to calculate: ${value}`);
+            return value;
+          }
+          sourcesToCalculateIterator.readable = false;
+          return null;
         };
+        let timeoutId: NodeJS.Timeout | null = null;
+        this.engine
+          .queryBindings(
+            `
+PREFIX ldp: <http://www.w3.org/ns/ldp#>
+PREFIX activo: <https://solidlabresearch.github.io/activity-ontology#>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+SELECT ?originalSource WHERE {
+  <${rawActivitiesIRI}> ldp:contains ?originalSource .
+  MINUS {
+    ?activity a activo:Activity ;
+      prov:wasDerivedFrom ?sourceIri .
+    ?sourceIri prov:atLocation ?originalSource .
+  }
+}
+`,
+            {
+              sources: [
+                rawActivitiesIRI,
+                createSourcesStreamFromBindingsStream(
+                  sourcesStream.map(bindings => {
+                    if (timeoutId) {
+                      clearTimeout(timeoutId);
+                    }
+                    timeoutId = setTimeout(() => {
+                      sourcesToCalculateIterator.readable = true;
+                    }, 1000);
+                    this.logger.info(bindings.toString());
+                    return bindings;
+                  }),
+                  ["source"]
+                )
+              ],
+              lenient: true
+            }
+          )
+          .then(async bindingsStream => {
+            bindingsStream.on("data", bindings => {
+              const source: string = bindings.get("originalSource").value;
+              this.logger.info(`Processing source: ${source}, as ${isAddition(bindings) ? "addition" : "deletion"}`);
+              if (isAddition(bindings)) {
+                sourcesToCalculateBuffer.add(source);
+              } else {
+                sourcesToCalculateBuffer.delete(source);
+              }
+              if (timeoutId) {
+                clearTimeout(timeoutId);
+              }
+              timeoutId = setTimeout(() => {
+                sourcesToCalculateIterator.readable = true;
+              }, 1000);
+            });
+            bindingsStream.on("end", () => {
+              this.logger.info("Bindings stream ended.");
+            });
+            bindingsStream.on("error", error => {
+              this.logger.error(error);
+            });
+            const activityIterator = sourcesToCalculateIterator
+              .map(path => {
+                if (path.endsWith(".fit")) {
+                  return { path: path, fileType: ActivityFileType.FIT };
+                }
+                if (path.endsWith(".gpx")) {
+                  return { path: path, fileType: ActivityFileType.GPX };
+                }
+                if (path.endsWith(".tcx")) {
+                  return { path: path, fileType: ActivityFileType.TCX };
+                }
+                return null;
+              })
+              .transform({
+                maxBufferSize: SolidConnector.BUFFER_SIZE,
+                transform: (
+                  data: { path: string; fileType: ActivityFileType },
+                  done: () => void,
+                  push: (value: {
+                    responsePromise: Promise<Response>;
+                    fileType: ActivityFileType;
+                    location: string;
+                  }) => void
+                ) => {
+                  this.syncEvents$.next(
+                    new ActivityDiscoveredEvent(ConnectorType.SOLID, null, data.fileType, data.path)
+                  );
+                  push({ responsePromise: fetch(data.path), fileType: data.fileType, location: data.path });
+                  done();
+                }
+              })
+              .transform({
+                maxBufferSize: SolidConnector.BUFFER_SIZE,
+                transform: (
+                  data: { responsePromise: Promise<Response>; fileType: ActivityFileType; location: string },
+                  done: () => void,
+                  push: (i: {
+                    sportsLibEventPromise: Promise<{ event: EventJSONInterface; logsInfo: string[] }>;
+                    activitySolid: ActivitySolid;
+                  }) => void
+                ) => {
+                  data.responsePromise.then(async response => {
+                    const activitySolid = new ActivitySolid(
+                      data.fileType,
+                      data.location,
+                      await response.arrayBuffer(),
+                      new Date(response.headers.get("last-modified"))
+                    );
+                    push({ sportsLibEventPromise: this.computeSportsLibEvent(activitySolid), activitySolid });
+                    done();
+                  });
+                }
+              })
+              .transform({
+                maxBufferSize: SolidConnector.BUFFER_SIZE,
+                transform: (
+                  data: {
+                    sportsLibEventPromise: Promise<{ event: EventJSONInterface; logsInfo: string[] }>;
+                    activitySolid: ActivitySolid;
+                  },
+                  done: () => void,
+                  push: (i: { activity: ActivityJSONInterface; activitySolid: ActivitySolid }) => void
+                ) => {
+                  data.sportsLibEventPromise.then(result => {
+                    result.logsInfo.forEach(log => this.logger.info(log));
+                    for (const activity of result.event.activities) {
+                      push({ activity, activitySolid: data.activitySolid });
+                    }
+                    done();
+                  });
+                }
+              })
+              .transform({
+                maxBufferSize: SolidConnector.BUFFER_SIZE,
+                transform: async (
+                  data: { activity: ActivityJSONInterface; activitySolid: ActivitySolid },
+                  done: () => void,
+                  push: (
+                    i: Promise<{
+                      computedActivity: Activity;
+                      deflatedStreams: string;
+                    }>
+                  ) => void
+                ) => {
+                  const sportsLibActivity = data.activity;
+                  if (sportsLibActivity && sportsLibActivity.type === ActivityTypes.Transition) {
+                    done();
+                  }
 
-        readIterator();
-        activityIterator.on("readable", readIterator);
+                  // Create bare activity from "sports-lib" activity
+                  let activity: Partial<Activity> = this.createBareActivity(sportsLibActivity);
+
+                  // Extract streams
+                  const streams = this.mapStreams(sportsLibActivity);
+
+                  // Set common activity properties
+                  activity = this.assignBaseProperties(activity, streams);
+
+                  // Assign reference to strava activity
+                  activity.extras = {
+                    file: {
+                      path: data.activitySolid.location,
+                      type: data.activitySolid.type
+                    }
+                  } as ActivityExtras;
+
+                  // Resolve athlete snapshot for current activity date
+                  // TODO we can do a query figuring out the athlete settings, if they change we can recalculate automatically
+                  const athleteSnapshot = this.athleteSnapshotResolver.resolve(activity.startTime);
+
+                  // Fetch source stats coming from files.
+                  // These stats will override the computed stats to display what the user had seen on his device
+                  activity.srcStats = this.getSourceStats(activity.type, sportsLibActivity, streams);
+
+                  // Process laps
+                  activity.laps = this.processLaps(activity.type, sportsLibActivity.laps);
+
+                  // Fetch device name if exists
+                  activity.device = this.fetchAndHandleDeviceName(data.activitySolid, sportsLibActivity.creator);
+
+                  // Set comment to null at the moment
+                  activity.notes = null;
+
+                  // Compute activity
+                  push(
+                    this.computeActivity(
+                      activity,
+                      athleteSnapshot,
+                      this.solidConnectorConfig.userSettings,
+                      streams,
+                      true
+                    )
+                  );
+                  done();
+                }
+              });
+
+            this.activeIterator = activityIterator;
+            const readIterator = async () => {
+              let resultPromise = activityIterator.read();
+              while (resultPromise) {
+                try {
+                  const { computedActivity, deflatedStreams } = await resultPromise;
+                  this.syncEvents$.next(
+                    new ActivitySyncEvent(ConnectorType.SOLID, null, computedActivity, true, deflatedStreams)
+                  );
+                } catch (error) {
+                  this.logger.error(error);
+                }
+                resultPromise = activityIterator.read();
+              }
+            };
+
+            readIterator();
+            activityIterator.on("readable", readIterator);
+          });
       });
 
     return this.syncEvents$;

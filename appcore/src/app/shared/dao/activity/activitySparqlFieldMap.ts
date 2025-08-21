@@ -1557,7 +1557,8 @@ export const ActivitySparqlFieldMap: {
   },
   activity_settingsLack: {
     graphPattern: "?activity activo:isWithoutAthletePerformance ?activity_settingsLack .",
-    requiredVariable: "activity"
+    requiredVariable: "activity",
+    required: true
   },
   activity_creationTime: {
     graphPattern: "?activity prov:generatedAtTime ?activity_creationTime .",

@@ -44,7 +44,7 @@ export class ActivityDao {
     });
     if (!response.ok) {
       let response = await fetch(containerIri, {
-        method: "POST"
+        method: "PUT"
       });
       if (!response.ok) {
         console.error("Error creating activity container:", containerIri, response.statusText);
@@ -171,8 +171,9 @@ SELECT ?activityIri WHERE {
     }) as Promise<boolean>;
   }
 
-  public async findActivitiesWithSettingsLacks(): Promise<Activity[]> {
+  public async findActivitiesWithSettingsLacks(keys?: string[]): Promise<Activity[]> {
     return this.activityMapping.query(await this.getDefaultSources(), {
+      keys,
       boundKeys: [
         {
           key: "activity_settingsLack",
