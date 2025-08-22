@@ -7,6 +7,7 @@ import { SolidConnectorInfoService } from "../../services/solid-connector-info/s
 import fetch from "cross-fetch";
 import { ActivityRDFMapper } from "./activityRDFMapper";
 import { v4 as uuidv4 } from "uuid";
+import { Subject } from "rxjs";
 
 @Injectable()
 export class ActivityDao {
@@ -16,6 +17,7 @@ export class ActivityDao {
   private activityLocationsBindingsStream: BindingsStream;
   private _activityLocations: string[] = [];
   private activityLocationPromise: Promise<void> | null;
+  public newActivityLocations$: Subject<string> = new Subject<string>();
 
   constructor(
     @Inject(SolidConnectorInfoService) private readonly solidConnectorInfoService: SolidConnectorInfoService
@@ -38,7 +40,6 @@ export class ActivityDao {
 
   private async subscribeActivityLocations(): Promise<void> {
     const containerIri = `${this.solidConnectorInfoService.fetch().base}${this.source}/`;
-    console.log(`Subscribing to activity locations at: ${containerIri}`);
     let response = await fetch(containerIri, {
       method: "HEAD"
     });
@@ -102,13 +103,13 @@ SELECT ?activityIri WHERE {
       }
       while (bindings) {
         resolveWithTimeout();
-        console.log(bindings.toString());
         const activityIri = bindings.get("activityIri");
         if (activityIri) {
           const activityLocation = activityIri.value;
           if (isAddition(bindings)) {
-            console.log(`Adding activity location: ${activityLocation}`);
+            console.log("Activity location added:", activityLocation);
             this._activityLocations.push(activityLocation);
+            this.newActivityLocations$.next(activityLocation);
           } else {
             this.activityLocations[this._activityLocations.find((location: string) => location === activityLocation)] =
               this._activityLocations.pop();

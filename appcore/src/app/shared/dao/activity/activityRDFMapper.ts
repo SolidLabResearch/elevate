@@ -226,7 +226,6 @@ PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
         query += "OFFSET " + options.slice.offset + "\n";
       }
     }
-    console.log("Querying activities,", query);
 
     if (options.type === "ask") {
       return this.queryEngine.queryBoolean(query, {
@@ -865,8 +864,6 @@ ORDER BY ?zoneIndex
       if ("age" in snap) addLit(athleteIri, "foaf:age", snap.age);
 
       const set = snap.athleteSettings as any;
-      console.log(snap);
-      console.log(set);
       if (set) {
         addLit(snapshotIri, "activo:maxHeartRate", set.maxHr);
         addLit(snapshotIri, "activo:restHeartRate", set.restHr);

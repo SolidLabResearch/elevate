@@ -296,7 +296,6 @@ export class SolidConnector extends BaseConnector {
           if (sourcesToCalculateBuffer.size > 0) {
             const value: string = sourcesToCalculateBuffer.values().next().value;
             sourcesToCalculateBuffer.delete(value);
-            this.logger.info(`Returning source to calculate: ${value}`);
             return value;
           }
           sourcesToCalculateIterator.readable = false;
@@ -341,7 +340,6 @@ SELECT ?originalSource WHERE {
           .then(async bindingsStream => {
             bindingsStream.on("data", bindings => {
               const source: string = bindings.get("originalSource").value;
-              this.logger.info(`Processing source: ${source}, as ${isAddition(bindings) ? "addition" : "deletion"}`);
               if (isAddition(bindings)) {
                 sourcesToCalculateBuffer.add(source);
               } else {
@@ -467,8 +465,9 @@ SELECT ?originalSource WHERE {
                   } as ActivityExtras;
 
                   // Resolve athlete snapshot for current activity date
-                  // TODO we can do a query figuring out the athlete settings, if they change we can recalculate automatically
+                  console.log(activity.startTime);
                   const athleteSnapshot = this.athleteSnapshotResolver.resolve(activity.startTime);
+                  console.log(athleteSnapshot);
 
                   // Fetch source stats coming from files.
                   // These stats will override the computed stats to display what the user had seen on his device
@@ -497,6 +496,12 @@ SELECT ?originalSource WHERE {
                 }
               });
 
+            activityIterator.on("error", error => {
+              bindingsStream.destroy(error);
+            });
+            activityIterator.on("end", () => {
+              bindingsStream.destroy();
+            });
             this.activeIterator = activityIterator;
             const readIterator = async () => {
               let resultPromise = activityIterator.read();

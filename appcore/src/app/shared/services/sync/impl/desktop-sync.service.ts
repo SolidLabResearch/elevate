@@ -13,7 +13,7 @@ import { SyncState } from "../sync-state.enum";
 import { ConnectorSyncDateTimeDao } from "../../../dao/sync/connector-sync-date-time.dao";
 import { StreamsService } from "../../streams/streams.service";
 import { FileConnectorInfoService } from "../../file-connector-info/file-connector-info.service";
-import { DataStore } from "../../../data-store/data-store";
+import { DataStore, DbEvent } from "../../../data-store/data-store";
 import { DesktopDataStore } from "../../../data-store/impl/desktop-data-store.service";
 import { Router } from "@angular/router";
 import { AppRoutes } from "../../../models/app-routes";
@@ -44,6 +44,7 @@ import { MatSnackBar } from "@angular/material/snack-bar";
 import BaseUserSettings = UserSettings.BaseUserSettings;
 import { SolidConnectorInfoService } from "../../solid-connector-info/solid-connector-info.service";
 import { SolidConnectorInfo } from "@elevate/shared/sync/connectors/solid-connector-info.model";
+import { filter, take } from "rxjs/operators";
 
 @Injectable()
 export class DesktopSyncService extends SyncService<ConnectorSyncDateTime[]> implements OnDestroy {
@@ -117,16 +118,24 @@ export class DesktopSyncService extends SyncService<ConnectorSyncDateTime[]> imp
       }
     });
 
-    this.sync(null, null, ConnectorType.SOLID).catch(error => {
-      if (
-        error.message ===
-        "Error invoking remote method 'startSync': Impossible to start a new sync. Another sync is already running on connector solid"
-      ) {
-        this.logger.debug("Sync already started on connector SOLID");
-        return;
-      }
-      return Promise.reject(error);
-    });
+    // Wait for database to be loaded before starting sync
+    this.desktopDataStore.dbEvent$
+      .pipe(
+        filter(dbEvent => dbEvent === DbEvent.LOADED),
+        take(1)
+      )
+      .subscribe(() => {
+        this.sync(null, null, ConnectorType.SOLID).catch(error => {
+          if (
+            error.message ===
+            "Error invoking remote method 'startSync': Impossible to start a new sync. Another sync is already running on connector solid"
+          ) {
+            this.logger.debug("Sync already started on connector SOLID");
+            return;
+          }
+          return Promise.reject(error);
+        });
+      });
   }
 
   public static transformErrorToSyncException(error: Error | Error[] | string | string[]): SyncException {
@@ -141,7 +150,11 @@ export class DesktopSyncService extends SyncService<ConnectorSyncDateTime[]> imp
     }
   }
 
-  public sync(fastSync: boolean = null, forceSync: boolean = null, connectorType: ConnectorType = null): Promise<void> {
+  public async sync(
+    fastSync: boolean = null,
+    forceSync: boolean = null,
+    connectorType: ConnectorType = null
+  ): Promise<void> {
     if (!connectorType) {
       throw new SyncException("ConnectorType param must be given");
     }

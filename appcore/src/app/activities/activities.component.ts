@@ -3,6 +3,7 @@ import moment from "moment";
 import { saveAs } from "file-saver";
 import { Component, Inject, OnDestroy, OnInit, ViewChild } from "@angular/core";
 import { ActivityService } from "../shared/services/activity/activity.service";
+import { ActivityDao } from "../shared/dao/activity/activity.dao";
 import { MatDialog } from "@angular/material/dialog";
 import { MatPaginator, PageEvent } from "@angular/material/paginator";
 import { MatSnackBar } from "@angular/material/snack-bar";
@@ -18,7 +19,7 @@ import { AppError } from "../shared/models/app-error.model";
 import { ConfirmDialogDataModel } from "../shared/dialogs/confirm-dialog/confirm-dialog-data.model";
 import { ConfirmDialogComponent } from "../shared/dialogs/confirm-dialog/confirm-dialog.component";
 import { Subject, Subscription, timer } from "rxjs";
-import { debounce } from "rxjs/operators";
+import { debounce, debounceTime } from "rxjs/operators";
 import { OPEN_RESOURCE_RESOLVER, OpenResourceResolver } from "../shared/services/links-opener/open-resource-resolver";
 import { AppService } from "../shared/services/app-service/app.service";
 import { ActivatedRoute, Router } from "@angular/router";
@@ -53,6 +54,7 @@ export class ActivitiesComponent implements OnInit, OnDestroy {
   private static readonly LS_SELECTED_COLUMNS: string = "activitiesTable.selectedColumns";
   private static readonly DEGRADED_PERFORMANCE_COLUMNS_COUNT: number = 35;
   private static readonly ACTIVITY_SEARCH_DEBOUNCE_TIME: number = 500;
+  private static readonly ACTIVITY_LOCATION_DEBOUNCE_TIME: number = 2000;
 
   public readonly ColumnType = ActivityColumns.ColumnType;
 
@@ -73,6 +75,11 @@ export class ActivitiesComponent implements OnInit, OnDestroy {
   public initialized: boolean;
   public isPerformanceDegraded: boolean;
   public historyChangesSub: Subscription;
+  public syncEventsSub: Subscription;
+  public newActivityLocationsSub: Subscription;
+  private activityLocationSubject$: Subject<string>;
+  private isRefreshing: boolean = false;
+  private pendingRefresh: boolean = false;
 
   public athleteSports: ElevateSport[];
   public activityNameSearch$: Subject<string>;
@@ -85,6 +92,7 @@ export class ActivitiesComponent implements OnInit, OnDestroy {
     @Inject(Router) private readonly router: Router,
     @Inject(SyncService) private readonly syncService: SyncService<any>,
     @Inject(ActivityService) private readonly activityService: ActivityService,
+    @Inject(ActivityDao) private readonly activityDao: ActivityDao,
     @Inject(UserSettingsService) private readonly userSettingsService: UserSettingsService,
     @Inject(OPEN_RESOURCE_RESOLVER) private readonly openResourceResolver: OpenResourceResolver,
     @Inject(MatSnackBar) private readonly snackBar: MatSnackBar,
@@ -97,6 +105,7 @@ export class ActivitiesComponent implements OnInit, OnDestroy {
     this.isPerformanceDegraded = false;
 
     this.activityNameSearch$ = new Subject();
+    this.activityLocationSubject$ = new Subject();
     this.preferences = new Preferences();
     this.today = new Date();
 
@@ -194,6 +203,14 @@ export class ActivitiesComponent implements OnInit, OnDestroy {
 
         // Get and apply data
         this.findAndDisplayActivities();
+
+        // Set up debounced activity location refresh
+        this.activityLocationSubject$
+          .pipe(debounceTime(ActivitiesComponent.ACTIVITY_LOCATION_DEBOUNCE_TIME))
+          .subscribe(() => {
+            console.log("Refreshing activities due to new activity location detected");
+            this.findAndDisplayActivities();
+          });
       })
       .catch(error => {
         if (error instanceof AppError && error.code === AppError.SYNC_NOT_SYNCED) {
@@ -209,6 +226,15 @@ export class ActivitiesComponent implements OnInit, OnDestroy {
       this.ngOnDestroy();
       this.ngOnInit();
     });
+
+    this.newActivityLocationsSub = this.activityDao.newActivityLocations$.subscribe(
+      (activityLocation: string) => {
+        this.activityLocationSubject$.next(activityLocation);
+      },
+      error => {
+        console.error("Error in new activity locations subscription:", error);
+      }
+    );
   }
 
   public columnsSetup(): void {
@@ -249,6 +275,16 @@ export class ActivitiesComponent implements OnInit, OnDestroy {
   }
 
   public findAndDisplayActivities(): void {
+    // Prevent concurrent refreshes
+    if (this.isRefreshing) {
+      this.pendingRefresh = true;
+      this.logger.debug("Refresh already in progress, marking as pending");
+      return;
+    }
+
+    this.isRefreshing = true;
+    this.pendingRefresh = false;
+
     // Build the query
     let hasAthleteSettings = false;
     const keys = this.displayedColumns
@@ -343,6 +379,14 @@ export class ActivitiesComponent implements OnInit, OnDestroy {
       })
       .finally(() => {
         this.initialized = true;
+        this.isRefreshing = false;
+
+        // If there was a pending refresh request while we were processing, schedule it now
+        if (this.pendingRefresh) {
+          this.logger.debug("Processing pending refresh request");
+          // Use the debounced subject instead of the old timer-based approach
+          this.activityLocationSubject$.next("pending_refresh");
+        }
       });
   }
 
