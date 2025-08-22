@@ -465,9 +465,7 @@ SELECT ?originalSource WHERE {
                   } as ActivityExtras;
 
                   // Resolve athlete snapshot for current activity date
-                  console.log(activity.startTime);
                   const athleteSnapshot = this.athleteSnapshotResolver.resolve(activity.startTime);
-                  console.log(athleteSnapshot);
 
                   // Fetch source stats coming from files.
                   // These stats will override the computed stats to display what the user had seen on his device
