@@ -135,3 +135,17 @@ First switch to desktop directory with `cd desktop/`
 ```bash
 npm run clean
 ```
+
+## Solid OIDC Client Metadata
+
+The Solid connector uses a hosted client metadata document:
+
+`https://solidlabresearch.github.io/elevate/client-id.jsonld`
+
+The source file lives at `docs/client-id.jsonld`.
+
+To publish/update this URL from this repository:
+
+1. Open repository **Settings > Pages**
+2. Set **Source** to deploy from branch `main` (or your working branch) and folder `/docs`
+3. Save and wait for GitHub Pages deployment to complete

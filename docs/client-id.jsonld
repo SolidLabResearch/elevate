@@ -1,0 +1,26 @@
+{
+  "@context": "https://www.w3.org/ns/solid/oidc-context.jsonld",
+  "client_id": "https://solidlabresearch.github.io/elevate/client-id.jsonld",
+  "client_name": "Elevate",
+  "redirect_uris": [
+    "http://localhost:4200/",
+    "http://localhost:4200/connectors",
+    "https://solidlabresearch.github.io/elevate/",
+    "https://solidlabresearch.github.io/elevate/connectors"
+  ],
+  "post_logout_redirect_uris": [
+    "http://localhost:4200/",
+    "http://localhost:4200/connectors",
+    "https://solidlabresearch.github.io/elevate/",
+    "https://solidlabresearch.github.io/elevate/connectors"
+  ],
+  "grant_types": [
+    "authorization_code",
+    "refresh_token"
+  ],
+  "response_types": [
+    "code"
+  ],
+  "scope": "openid webid offline_access",
+  "token_endpoint_auth_method": "none"
+}
