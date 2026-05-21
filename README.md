@@ -73,6 +73,38 @@ npm test
 
 (_Should be executed with success for any pull request submission_).
 
+#### Start the other services
+
+Start Loama to provide the UI for policies:
+```bash
+cd ..
+git clone https://github.com/maartyman/loama
+cd loama
+npm install
+npm run dev
+```
+
+Start the Solid server and auth server:
+```bash
+cd ..
+git clone https://github.com/maartyman/user-managed-access
+cd user-managed-access
+npm install
+npm run start
+```
+
+Start the fill pod web UI to upload some FIT files to your pod:
+```bash
+cd ./fill-pod-web/
+npm run fill-pod:web
+```
+
+Start the aggregator server to convert FIT files to RDF and write them back to the pod:
+```bash
+cd ./aggregator/
+npm run build && npm run start
+```
+
 #### Desktop development environment
 
 All commands displayed in this section will be executed in `./desktop/` folder. So:
@@ -147,5 +179,5 @@ The source file lives at `docs/client-id.jsonld`.
 To publish/update this URL from this repository:
 
 1. Open repository **Settings > Pages**
-2. Set **Source** to deploy from branch `main` (or your working branch) and folder `/docs`
+2. Set **Source** to deploy from branch `develop` (or your working branch) and folder `/docs`
 3. Save and wait for GitHub Pages deployment to complete

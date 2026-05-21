@@ -26,6 +26,7 @@
     "validate:desktop": "npm run type:check:desktop && npm run clean && cd ./appcore/ && npm test && cd ../desktop/ && npm test && npm run build:prod",
     "postinstall": "cd appcore/ && npm install && cd ../desktop/ && npm install",
     "prettier": "prettier --write .",
+    "fill-pod:web": "node ./fill-pod-web/server.js",
     "upgrade:check": "ncu",
     "upgrade:apply": "npm run upgrade:check -- -u",
     "test": "npm run clean && cd ./desktop/ && npm test && cd ../appcore/ && npm test",

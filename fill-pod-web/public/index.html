@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fill Pod</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <img src="/assets/elevate_logo.svg" alt="Elevate" />
+        <div>
+          <h1>Fill Pod</h1>
+          <p>Upload FIT activities to a Solid pod</p>
+        </div>
+      </div>
+      <div class="status-pill" id="serverStatus">Ready</div>
+    </header>
+
+    <main class="workspace">
+      <section class="settings">
+        <label class="field">
+          <span>Solid issuer</span>
+          <input id="issuer" type="url" value="http://rs.local:3000" spellcheck="false" />
+        </label>
+        <div class="auth-actions">
+          <button id="loginButton" type="button">Log in</button>
+          <button id="logoutButton" type="button" class="secondary" disabled>Log out</button>
+        </div>
+        <div class="account-info">
+          <div>
+            <span>WebID</span>
+            <strong id="webId">Not logged in</strong>
+          </div>
+          <div>
+            <span>Pod root</span>
+            <strong id="podRoot">Not available</strong>
+          </div>
+        </div>
+        <label class="check-field">
+          <input id="clearActivities" type="checkbox" />
+          <span>Clear generated activity documents first</span>
+        </label>
+      </section>
+
+      <section class="upload-panel">
+        <div class="generator-panel">
+          <div class="generator-fields">
+            <label class="field">
+              <span>Generate</span>
+              <input id="generateCount" type="number" min="1" max="100" step="1" value="5" />
+            </label>
+            <label class="field">
+              <span>Sport</span>
+              <select id="generateSport">
+                <option value="random">Random</option>
+                <option value="cycling">Cycling</option>
+                <option value="running">Running</option>
+                <option value="swimming">Swimming</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Duration</span>
+              <input id="generateDuration" type="number" min="1" step="1" placeholder="Random" />
+            </label>
+            <label class="field">
+              <span>Power</span>
+              <select id="generatePower">
+                <option value="auto">Auto</option>
+                <option value="on">On</option>
+                <option value="off">Off</option>
+              </select>
+            </label>
+            <label class="field seed-field">
+              <span>Seed</span>
+              <input id="generateSeed" type="text" placeholder="Random" spellcheck="false" />
+            </label>
+          </div>
+          <button id="generateFitButton" type="button" class="secondary">Generate FIT</button>
+        </div>
+
+        <div class="drop-zone" id="dropZone">
+          <input id="fileInput" type="file" accept=".fit,application/vnd.ant.fit" multiple />
+          <div class="drop-copy">
+            <strong>Choose FIT files</strong>
+            <span id="fileSummary">No files selected</span>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button id="uploadButton" type="button" disabled>Upload</button>
+          <button id="clearSelectionButton" type="button" class="secondary" disabled>Clear</button>
+        </div>
+      </section>
+
+      <section class="file-list" aria-live="polite">
+        <div class="list-head">
+          <h2>Selected files</h2>
+          <span id="totalSize">0 KB</span>
+        </div>
+        <div id="uploadSummary" class="upload-summary" hidden>
+          <strong id="uploadSummaryTitle"></strong>
+          <span id="uploadSummaryText"></span>
+        </div>
+        <div id="emptyState" class="empty-state">Select one or more .fit files.</div>
+        <ol id="files" class="files"></ol>
+      </section>
+    </main>
+
+    <script src="/fit-generator.js"></script>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
