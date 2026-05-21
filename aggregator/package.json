@@ -1,0 +1,15 @@
+{
+  "name": "elevate-fit-rdf-aggregator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone Aggregator Protocol server that converts Solid Pod FIT/GPX/TCX files to Elevate activo RDF.",
+  "scripts": {
+    "build": "node ../appcore/node_modules/typescript/bin/tsc -p tsconfig.json",
+    "dev": "NODE_PATH=../appcore/node_modules:../desktop/node_modules:../node_modules node ../appcore/node_modules/ts-node/dist/bin.js -P tsconfig.json src/server.ts",
+    "test": "npm run build && NODE_PATH=../appcore/node_modules:../desktop/node_modules:../node_modules node test/spec-compliance.test.js",
+    "start": "NODE_PATH=../appcore/node_modules:../desktop/node_modules:../node_modules node dist/aggregator/src/server.js"
+  },
+  "dependencies": {
+    "@elevate/shared": "file:../appcore/modules/shared"
+  }
+}
