@@ -37,6 +37,7 @@ import { ElevateSport } from "@elevate/shared/enums/elevate-sport.enum";
 import { MeasureSystem } from "@elevate/shared/enums/measure-system.enum";
 import { Activity } from "@elevate/shared/models/sync/activity.model";
 import BaseUserSettings = UserSettings.BaseUserSettings;
+import { SolidConnectorInfoService } from "../shared/services/solid-connector-info/solid-connector-info.service";
 
 @Component({
   selector: "app-year-progress",
@@ -176,6 +177,8 @@ export class YearProgressComponent implements OnInit, OnDestroy {
   public yearProgressPresetsCount: number;
   public isProgressionInitialized;
   public isGraphExpanded: boolean;
+  public multipleAthleteWarning: string;
+  private primaryAthleteId: string;
 
   public historyChangesSub: Subscription;
 
@@ -184,6 +187,7 @@ export class YearProgressComponent implements OnInit, OnDestroy {
     @Inject(UserSettingsService) private readonly userSettingsService: UserSettingsService,
     @Inject(SyncService) private readonly syncService: SyncService<any>,
     @Inject(ActivityService) private readonly activityService: ActivityService,
+    @Inject(SolidConnectorInfoService) private readonly solidConnectorInfoService: SolidConnectorInfoService,
     @Inject(YearProgressService) public readonly yearProgressService: YearProgressService,
     @Inject(MatDialog) private readonly dialog: MatDialog,
     @Inject(MediaObserver) public readonly mediaObserver: MediaObserver,
@@ -229,16 +233,23 @@ export class YearProgressComponent implements OnInit, OnDestroy {
   }
 
   public initialize(): void {
+    this.updateAthleteSelectionWarning();
     this.activityService
-      .count()
+      .count(
+        this.primaryAthleteId ? { boundKeys: [{ key: "activity_athleteId", value: this.primaryAthleteId }] } : undefined
+      )
       .then((count: number) => {
         this.hasActivities = count > 0;
 
+        const boundKeys: { key: string; value: string }[] = this.primaryAthleteId
+          ? [{ key: "activity_athleteId", value: this.primaryAthleteId }]
+          : [];
         return this.hasActivities
           ? Promise.all([
               this.userSettingsService.fetch(),
               this.activityService.find({
                 keys: [
+                  "activity_athleteId",
                   "activity_startTime",
                   "activity_type",
                   "activity_trainer",
@@ -246,7 +257,8 @@ export class YearProgressComponent implements OnInit, OnDestroy {
                   "activity_stats_distance",
                   "activity_stats_movingTime",
                   "activity_stats_elevationGain"
-                ]
+                ],
+                boundKeys
               })
             ])
           : Promise.reject(new AppError(AppError.SYNC_NOT_SYNCED, "No activities available"));
@@ -280,7 +292,13 @@ export class YearProgressComponent implements OnInit, OnDestroy {
    */
   public setup(): void {
     // Find all unique sport types
-    const activityCountByTypeModels = this.activityService.countByType();
+    const activityCountByTypeModels = _.map(
+      _.groupBy(this.activities, "type"),
+      (activities: Activity[], type: ElevateSport) => ({
+        type,
+        count: activities.length
+      })
+    );
 
     this.availableActivityTypes = _.map(activityCountByTypeModels, "type");
 
@@ -338,6 +356,15 @@ export class YearProgressComponent implements OnInit, OnDestroy {
     this.isProgressionInitialized = true;
 
     this.logger.debug("Setup done");
+  }
+
+  private updateAthleteSelectionWarning(): void {
+    const selectedAthletes = this.solidConnectorInfoService.selectedAthleteWebIds();
+    this.primaryAthleteId = selectedAthletes[0] || null;
+    this.multipleAthleteWarning =
+      selectedAthletes.length > 1
+        ? `multiple athletes are selected, showing data for athlete ${this.primaryAthleteId}`
+        : null;
   }
 
   /**

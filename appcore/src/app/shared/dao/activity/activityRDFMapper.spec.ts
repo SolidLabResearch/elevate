@@ -139,6 +139,34 @@ async function queryStore(
 }
 
 describe("ActivityMapping round-trip", () => {
+  it("should treat a missing activity container as an empty source", async () => {
+    const mapping = new ActivityRDFMapper(
+      jest.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        statusText: "Not Found"
+      }) as any
+    );
+
+    const count = await mapping.query(["http://rs.local:3000/alice/activities/"], { type: "count" });
+
+    expect(count).toBe(0);
+  });
+
+  it("should still fail for unrelated missing RDF sources", async () => {
+    const mapping = new ActivityRDFMapper(
+      jest.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        statusText: "Not Found"
+      }) as any
+    );
+
+    await expect(mapping.query(["http://rs.local:3000/alice/profile"], { type: "count" })).rejects.toThrow(
+      "Failed to load RDF source http://rs.local:3000/alice/profile: 404 Not Found"
+    );
+  });
+
   it("should serialize and query back a simple activity", async () => {
     const act = new Activity();
     act.id = "test-activity"; // fragment after # in the IRI
@@ -217,6 +245,25 @@ describe("ActivityMapping round-trip", () => {
       console.error("Round-trip failed:", res.diff, "\n", res);
     }
     expect(res.ok).toBe(true);
+  });
+
+  it("should serialize activity type as a local ontology concept instead of a sport-specific activity subclass", () => {
+    const act = new Activity();
+    act.id = "test-activity";
+    act.name = "Morning Run";
+    act.type = ElevateSport.Run;
+    act.startTime = "2025-08-11T06:00:00Z";
+    act.endTime = "2025-08-11T07:00:00Z";
+
+    const ttl = new ActivityRDFMapper().write("http://example.org/test-activity", act);
+
+    expect(ttl).toContain(
+      "<http://example.org/test-activity#activity> activo:activityType <https://solidlabresearch.github.io/activity-ontology#Run> ."
+    );
+    expect(ttl).not.toContain("<http://example.org/test-activity#activity> a activo:Run .");
+    expect(ttl).not.toContain("rdfs:subClassOf activo:Activity");
+    expect(ttl).not.toContain("activo:hasPowerData");
+    expect(ttl).not.toContain("activo:isWithoutAthletePerformance");
   });
 
   it("should serialize and query back a complete activity schema", async () => {
@@ -825,5 +872,9 @@ describe("ActivityMapping round-trip", () => {
       console.error("Round-trip failed:", res.diff);
     }
     expect(res.ok).toBe(true);
+    expect(res.written).not.toContain("activo:hasSourceStats");
+    expect(res.written).toContain("activo:RecordingActivity");
+    expect(res.written).toContain("activo:StatsComputationActivity");
+    expect(res.written).toContain("prov:wasAssociatedWith");
   });
 });

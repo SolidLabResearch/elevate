@@ -5,11 +5,16 @@
 
 <app-activities-required></app-activities-required>
 
+<div *ngIf="multipleAthleteWarning" fxLayout="row" fxLayoutAlign="center center" class="mat-caption warn-color">
+  <mat-icon color="warn" fontSet="material-icons-outlined" inline="true">warning</mat-icon>
+  {{multipleAthleteWarning}}
+</div>
+
 <mat-card *ngIf="hasActivities === false">
   <app-year-progress-user-guide [readMore]="false"></app-year-progress-user-guide>
 </mat-card>
 
-<mat-card *ngIf="hasActivities">
+<mat-card *ngIf="hasActivities && isProgressionInitialized">
   <mat-card-content>
     <div fxLayout="row" fxLayout.lt-lg="column" fxLayoutAlign="start start">
       <div fxLayout="row" fxLayoutAlign="space-between start" fxFlexFill fxFlex="60" fxFlex.lt-lg="100">

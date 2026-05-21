@@ -1,4 +1,6 @@
 import { Bindings } from "@rdfjs/types";
+import { ElevateSport } from "@elevate/shared/enums/elevate-sport.enum";
+import { elevateSportForActivityTypeIri } from "./activity-type-ontology-map";
 
 export const ActivitySparqlFieldMap: {
   [key: string]: {
@@ -16,10 +18,27 @@ export const ActivitySparqlFieldMap: {
   },
   activity_type: {
     graphPattern:
-      "?activity a ?activity_type_class ." +
-      "?activity_type_class rdfs:label ?activity_type ." +
-      "?activity_type_class rdfs:subClassOf activo:Activity .",
+      "OPTIONAL {\n" +
+      "  ?activity activo:activityType ?activity_type_concept_iri .\n" +
+      "  OPTIONAL { ?activity_type_concept_iri skos:prefLabel ?activity_type_prefLabel . }\n" +
+      "  OPTIONAL { ?activity_type_concept_iri rdfs:label ?activity_type_label . }\n" +
+      "}\n" +
+      "OPTIONAL {\n" +
+      "  ?activity a ?legacy_activity_type_class .\n" +
+      "  FILTER(?legacy_activity_type_class != activo:Activity)\n" +
+      "  OPTIONAL { ?legacy_activity_type_class rdfs:label ?legacy_activity_type_label . }\n" +
+      "}\n" +
+      "BIND(COALESCE(?activity_type_concept_iri, ?legacy_activity_type_class) AS ?activity_type_iri)\n" +
+      'BIND(COALESCE(?activity_type_prefLabel, ?activity_type_label, ?legacy_activity_type_label, STRAFTER(STR(?activity_type_iri), "#"), "Other") AS ?activity_type)',
     requiredVariable: "activity",
+    formatValue: (bindings: Bindings) => {
+      const activityTypeIri = bindings.get("activity_type_iri")?.value;
+      const mappedSport = elevateSportForActivityTypeIri(activityTypeIri);
+      if (mappedSport) {
+        return mappedSport;
+      }
+      return bindings.get("activity_type")?.value || ElevateSport.Other;
+    },
     required: true
   },
   activity_startTime: {
@@ -55,7 +74,13 @@ export const ActivitySparqlFieldMap: {
     required: true
   },
   activity_hasPowerMeter: {
-    graphPattern: "?activity activo:hasPowerData ?activity_hasPowerMeter .", // alternate calculation
+    graphPattern:
+      "BIND(EXISTS {\n" +
+      "  ?activity activo:hasStats ?activity_hasPowerMeter_stats .\n" +
+      "  ?activity_hasPowerMeter_stats prov:wasGeneratedBy ?activity_hasPowerMeter_generation .\n" +
+      "  ?activity_hasPowerMeter_generation a activo:RecordingActivity .\n" +
+      "  ?activity_hasPowerMeter_stats activo:hasPowerStats ?activity_hasPowerMeter_powerStats .\n" +
+      "} AS ?activity_hasPowerMeter)",
     requiredVariable: "activity",
     required: true
   },
@@ -79,6 +104,18 @@ export const ActivitySparqlFieldMap: {
     ignore: true,
     required: true
   },
+  activity_athleteId: {
+    graphPattern:
+      "OPTIONAL { ?activity activo:hasAthlete ?activity_athleteId_explicit . }\n" +
+      'BIND(IF(CONTAINS(STR(?activity), "/activities/"), IRI(CONCAT(STRBEFORE(STR(?activity), "/activities/"), "/profile/card#me")), ?activity) AS ?activity_athleteId_fallback)\n' +
+      'BIND(IF(BOUND(?activity_athleteId_explicit) && CONTAINS(STR(?activity_athleteId_explicit), "/profile/card#me"), ?activity_athleteId_explicit, ?activity_athleteId_fallback) AS ?activity_athleteId)',
+    requiredVariable: "activity",
+    formatValue: (bindings: Bindings) => {
+      const athleteId = bindings.get("activity_athleteId")?.value || null;
+      return athleteId && athleteId.includes("/profile/card#me") ? athleteId : null;
+    },
+    required: true
+  },
   activity_athleteSnapshot_gender: {
     graphPattern: "?activity_athlete foaf:gender ?activity_athleteSnapshot_gender .",
     requiredVariable: "activity_athlete",
@@ -89,8 +126,10 @@ export const ActivitySparqlFieldMap: {
     requiredVariable: "activity_athlete"
   },
   activity_athleteSnapshot: {
-    graphPattern: "?activity activo:hasPerformanceSnapshot ?activity_athleteSnapshot .",
-    requiredVariable: "activity",
+    graphPattern:
+      "?activity_athlete activo:hasAthleteSettingsHistory ?activity_athleteSettingsHistory .\n" +
+      "?activity_athleteSettingsHistory activo:hasDatedAthleteSettings ?activity_athleteSnapshot .",
+    requiredVariable: "activity_athlete",
     ignore: true,
     required: true
   },
@@ -126,12 +165,12 @@ export const ActivitySparqlFieldMap: {
   },
   activity_athleteSnapshot_athleteSettings_runningFtp: {
     graphPattern:
-      "?activity_athleteSnapshot activo:runningFunctionalThresholdPower ?activity_athleteSnapshot_athleteSettings_runningFtp .",
+      "?activity_athleteSnapshot activo:runningFunctionalThresholdPace ?activity_athleteSnapshot_athleteSettings_runningFtp .",
     requiredVariable: "activity_athleteSnapshot"
   },
   activity_athleteSnapshot_athleteSettings_swimFtp: {
     graphPattern:
-      "?activity_athleteSnapshot activo:swimmingFunctionalThresholdPower ?activity_athleteSnapshot_athleteSettings_swimFtp .",
+      "?activity_athleteSnapshot activo:swimmingFunctionalThresholdSpeed ?activity_athleteSnapshot_athleteSettings_swimFtp .",
     requiredVariable: "activity_athleteSnapshot"
   },
   activity_athleteSnapshot_athleteSettings_weight: {
@@ -141,7 +180,10 @@ export const ActivitySparqlFieldMap: {
   },
 
   activity_srcStats: {
-    graphPattern: "?activity activo:hasSourceStats ?activity_srcStats .",
+    graphPattern:
+      "?activity activo:hasStats ?activity_srcStats .\n" +
+      "?activity_srcStats prov:wasGeneratedBy ?activity_srcStats_generation .\n" +
+      "?activity_srcStats_generation a activo:RecordingActivity .",
     requiredVariable: "activity",
     ignore: true
   },
@@ -824,7 +866,12 @@ export const ActivitySparqlFieldMap: {
 
   // normal stats
   activity_stats: {
-    graphPattern: "?activity activo:hasStats ?activity_stats .",
+    graphPattern:
+      "?activity activo:hasStats ?activity_stats .\n" +
+      "FILTER NOT EXISTS {\n" +
+      "  ?activity_stats prov:wasGeneratedBy ?activity_stats_recordingActivity .\n" +
+      "  ?activity_stats_recordingActivity a activo:RecordingActivity .\n" +
+      "}",
     requiredVariable: "activity",
     ignore: true,
     required: true
@@ -1556,7 +1603,94 @@ export const ActivitySparqlFieldMap: {
     required: true
   },
   activity_settingsLack: {
-    graphPattern: "?activity activo:isWithoutAthletePerformance ?activity_settingsLack .",
+    graphPattern:
+      "BIND(\n" +
+      "  !EXISTS {\n" +
+      "    ?activity activo:hasStats ?activity_settingsLack_scoresStats .\n" +
+      "    FILTER NOT EXISTS {\n" +
+      "      ?activity_settingsLack_scoresStats prov:wasGeneratedBy ?activity_settingsLack_scoresRecording .\n" +
+      "      ?activity_settingsLack_scoresRecording a activo:RecordingActivity .\n" +
+      "    }\n" +
+      "    ?activity_settingsLack_scoresStats activo:hasScores ?activity_settingsLack_scores .\n" +
+      "    ?activity_settingsLack_scores activo:trainingImpulse ?activity_settingsLack_trimp .\n" +
+      "    ?activity_settingsLack_scores activo:heartRateStressScore ?activity_settingsLack_hrss .\n" +
+      "  }\n" +
+      "  &&\n" +
+      "  (\n" +
+      "    (\n" +
+      "      (\n" +
+      "        EXISTS { ?activity activo:activityType ?activity_settingsLack_rideType . VALUES ?activity_settingsLack_rideType { activo:Ride activo:VirtualRide } }\n" +
+      "        || EXISTS { ?activity a ?activity_settingsLack_legacyRideType . VALUES ?activity_settingsLack_legacyRideType { activo:Ride activo:VirtualRide } }\n" +
+      "      )\n" +
+      "      && EXISTS {\n" +
+      "        ?activity activo:hasStats ?activity_settingsLack_rideStats .\n" +
+      "        FILTER NOT EXISTS {\n" +
+      "          ?activity_settingsLack_rideStats prov:wasGeneratedBy ?activity_settingsLack_rideRecording .\n" +
+      "          ?activity_settingsLack_rideRecording a activo:RecordingActivity .\n" +
+      "        }\n" +
+      "        ?activity_settingsLack_rideStats activo:hasPowerStats ?activity_settingsLack_powerStats .\n" +
+      "        ?activity_settingsLack_powerStats activo:average ?activity_settingsLack_powerAverage .\n" +
+      "        FILTER(?activity_settingsLack_powerAverage > 0)\n" +
+      "      }\n" +
+      "      && NOT EXISTS {\n" +
+      "        ?activity activo:hasAthlete ?activity_settingsLack_rideAthlete .\n" +
+      "        ?activity_settingsLack_rideAthlete activo:hasAthleteSettingsHistory ?activity_settingsLack_rideHistory .\n" +
+      "        ?activity_settingsLack_rideHistory activo:hasDatedAthleteSettings ?activity_settingsLack_rideSettings .\n" +
+      "        ?activity_settingsLack_rideSettings activo:cyclingFunctionalThresholdPower ?activity_settingsLack_cyclingFtp .\n" +
+      "        FILTER(?activity_settingsLack_cyclingFtp > 0)\n" +
+      "      }\n" +
+      "    )\n" +
+      "    ||\n" +
+      "    (\n" +
+      "      (\n" +
+      "        EXISTS { ?activity activo:activityType ?activity_settingsLack_runType . VALUES ?activity_settingsLack_runType { activo:Run activo:VirtualRun } }\n" +
+      "        || EXISTS { ?activity a ?activity_settingsLack_legacyRunType . VALUES ?activity_settingsLack_legacyRunType { activo:Run activo:VirtualRun } }\n" +
+      "      )\n" +
+      "      && EXISTS {\n" +
+      "        ?activity activo:hasStats ?activity_settingsLack_runStats .\n" +
+      "        FILTER NOT EXISTS {\n" +
+      "          ?activity_settingsLack_runStats prov:wasGeneratedBy ?activity_settingsLack_runRecording .\n" +
+      "          ?activity_settingsLack_runRecording a activo:RecordingActivity .\n" +
+      "        }\n" +
+      "        ?activity_settingsLack_runStats activo:hasPaceStats ?activity_settingsLack_paceStats .\n" +
+      "        ?activity_settingsLack_paceStats activo:gradeAdjustedAverage ?activity_settingsLack_gap .\n" +
+      "        FILTER(?activity_settingsLack_gap > 0)\n" +
+      "      }\n" +
+      "      && NOT EXISTS {\n" +
+      "        ?activity activo:hasAthlete ?activity_settingsLack_runAthlete .\n" +
+      "        ?activity_settingsLack_runAthlete activo:hasAthleteSettingsHistory ?activity_settingsLack_runHistory .\n" +
+      "        ?activity_settingsLack_runHistory activo:hasDatedAthleteSettings ?activity_settingsLack_runSettings .\n" +
+      "        ?activity_settingsLack_runSettings activo:runningFunctionalThresholdPace ?activity_settingsLack_runningFtp .\n" +
+      "        FILTER(?activity_settingsLack_runningFtp > 0)\n" +
+      "      }\n" +
+      "    )\n" +
+      "    ||\n" +
+      "    (\n" +
+      "      (\n" +
+      "        EXISTS { ?activity activo:activityType activo:Swim . }\n" +
+      "        || EXISTS { ?activity a activo:Swim . }\n" +
+      "      )\n" +
+      "      && EXISTS {\n" +
+      "        ?activity activo:hasStats ?activity_settingsLack_swimStats .\n" +
+      "        FILTER NOT EXISTS {\n" +
+      "          ?activity_settingsLack_swimStats prov:wasGeneratedBy ?activity_settingsLack_swimRecording .\n" +
+      "          ?activity_settingsLack_swimRecording a activo:RecordingActivity .\n" +
+      "        }\n" +
+      "        ?activity_settingsLack_swimStats activo:distance ?activity_settingsLack_swimDistance .\n" +
+      "        ?activity_settingsLack_swimStats activo:movingTime ?activity_settingsLack_swimMovingTime .\n" +
+      "        ?activity_settingsLack_swimStats activo:elapsedTime ?activity_settingsLack_swimElapsedTime .\n" +
+      "        FILTER(?activity_settingsLack_swimDistance > 0 && ?activity_settingsLack_swimMovingTime > 0 && ?activity_settingsLack_swimElapsedTime > 0)\n" +
+      "      }\n" +
+      "      && NOT EXISTS {\n" +
+      "        ?activity activo:hasAthlete ?activity_settingsLack_swimAthlete .\n" +
+      "        ?activity_settingsLack_swimAthlete activo:hasAthleteSettingsHistory ?activity_settingsLack_swimHistory .\n" +
+      "        ?activity_settingsLack_swimHistory activo:hasDatedAthleteSettings ?activity_settingsLack_swimSettings .\n" +
+      "        ?activity_settingsLack_swimSettings activo:swimmingFunctionalThresholdSpeed ?activity_settingsLack_swimFtp .\n" +
+      "        FILTER(?activity_settingsLack_swimFtp > 0)\n" +
+      "      }\n" +
+      "    )\n" +
+      "  )\n" +
+      "AS ?activity_settingsLack)",
     requiredVariable: "activity",
     required: true
   },

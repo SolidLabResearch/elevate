@@ -1,7 +1,7 @@
 import _ from "lodash";
 import moment from "moment";
 import { saveAs } from "file-saver";
-import { Component, Inject, OnDestroy, OnInit, ViewChild } from "@angular/core";
+import { Component, Inject, NgZone, OnDestroy, OnInit, ViewChild } from "@angular/core";
 import { ActivityService } from "../shared/services/activity/activity.service";
 import { ActivityDao } from "../shared/dao/activity/activity.dao";
 import { MatDialog } from "@angular/material/dialog";
@@ -15,7 +15,7 @@ import { GotItDialogComponent } from "../shared/dialogs/got-it-dialog/got-it-dia
 import { GotItDialogDataModel } from "../shared/dialogs/got-it-dialog/got-it-dialog-data.model";
 import { LoggerService } from "../shared/services/logging/logger.service";
 import { SyncService } from "../shared/services/sync/sync.service";
-import { AppError } from "../shared/models/app-error.model";
+import { DesktopSyncService } from "../shared/services/sync/impl/desktop-sync.service";
 import { ConfirmDialogDataModel } from "../shared/dialogs/confirm-dialog/confirm-dialog-data.model";
 import { ConfirmDialogComponent } from "../shared/dialogs/confirm-dialog/confirm-dialog.component";
 import { Subject, Subscription, timer } from "rxjs";
@@ -29,6 +29,8 @@ import { ElevateSport } from "@elevate/shared/enums/elevate-sport.enum";
 import { MeasureSystem } from "@elevate/shared/enums/measure-system.enum";
 import { Activity } from "@elevate/shared/models/sync/activity.model";
 import { UserSettings } from "@elevate/shared/models/user-settings/user-settings.namespace";
+import { SyncEventType } from "@elevate/shared/sync/events/sync-event-type";
+import { ConnectorType } from "@elevate/shared/sync/connectors/connector-type.enum";
 import NumberColumn = ActivityColumns.NumberColumn;
 import BaseUserSettings = UserSettings.BaseUserSettings;
 import { FieldInfo, Parser as Json2CsvParser } from "json2csv";
@@ -77,6 +79,8 @@ export class ActivitiesComponent implements OnInit, OnDestroy {
   public historyChangesSub: Subscription;
   public syncEventsSub: Subscription;
   public newActivityLocationsSub: Subscription;
+  private activityLocationRefreshSub: Subscription;
+  private activityNameSearchSub: Subscription;
   private activityLocationSubject$: Subject<string>;
   private isRefreshing: boolean = false;
   private pendingRefresh: boolean = false;
@@ -90,19 +94,21 @@ export class ActivitiesComponent implements OnInit, OnDestroy {
     @Inject(AppService) private readonly appService: AppService,
     @Inject(ActivatedRoute) private readonly route: ActivatedRoute,
     @Inject(Router) private readonly router: Router,
-    @Inject(SyncService) private readonly syncService: SyncService<any>,
+    @Inject(SyncService) private readonly syncService: DesktopSyncService,
     @Inject(ActivityService) private readonly activityService: ActivityService,
     @Inject(ActivityDao) private readonly activityDao: ActivityDao,
     @Inject(UserSettingsService) private readonly userSettingsService: UserSettingsService,
     @Inject(OPEN_RESOURCE_RESOLVER) private readonly openResourceResolver: OpenResourceResolver,
     @Inject(MatSnackBar) private readonly snackBar: MatSnackBar,
     @Inject(MatDialog) private readonly dialog: MatDialog,
-    @Inject(LoggerService) private readonly logger: LoggerService
+    @Inject(LoggerService) private readonly logger: LoggerService,
+    @Inject(NgZone) private readonly ngZone: NgZone
   ) {
     this.hasActivities = null; // Can be null: don't know yet true/false status
     this.hasEmptyResults = null; // Can be null: don't know yet true/false status
     this.initialized = false;
     this.isPerformanceDegraded = false;
+    this.isImperial = false;
 
     this.activityNameSearch$ = new Subject();
     this.activityLocationSubject$ = new Subject();
@@ -168,56 +174,53 @@ export class ActivitiesComponent implements OnInit, OnDestroy {
 
   public ngOnInit(): void {
     // Listen for activity name search changes and re-fetch data from.
-    this.activityNameSearch$
+    this.activityNameSearchSub = this.activityNameSearch$
       .pipe(debounce(() => timer(ActivitiesComponent.ACTIVITY_SEARCH_DEBOUNCE_TIME)))
       .subscribe(() => this.onActivityPrefNameChange());
 
-    this.activityService
-      .count()
-      .then((count: number) => {
-        this.hasActivities = count > 0;
-        return this.hasActivities
-          ? this.userSettingsService.fetch()
-          : Promise.reject(new AppError(AppError.SYNC_NOT_SYNCED, "No activities available"));
-      })
+    // Filter displayed columns
+    this.columnsSetup();
+
+    // Data source setup
+    this.dataSourceSetup();
+
+    // Check if preferences have been provided from url then apply if exists
+    if (this.route.snapshot.queryParams.preferences) {
+      try {
+        this.preferences = JSON.parse(this.route.snapshot.queryParams.preferences);
+        this.logger.debug("Applying found preferences: ", this.preferences);
+      } catch (e) {
+        this.logger.error("Failed to parse url preferences provided");
+        this.preferences = new Preferences();
+      }
+    }
+
+    // Set up debounced activity refresh before the initial query so an empty startup can still react to the first sync.
+    this.activityLocationRefreshSub = this.activityLocationSubject$
+      .pipe(debounceTime(ActivitiesComponent.ACTIVITY_LOCATION_DEBOUNCE_TIME))
+      .subscribe(() => {
+        console.log("Refreshing activities due to new activity location detected");
+        this.ngZone.run(() => this.findAndDisplayActivities());
+      });
+
+    this.userSettingsService
+      .fetch()
       .then((userSettings: BaseUserSettings) => {
         this.isImperial = userSettings.systemUnit === MeasureSystem.IMPERIAL;
+        return this.activityService.count();
       })
-      .then(() => {
-        // Filter displayed columns
-        this.columnsSetup();
-
-        // Data source setup
-        this.dataSourceSetup();
-
-        // Check if preferences have been provided from url then apply if exists
-        if (this.route.snapshot.queryParams.preferences) {
-          try {
-            this.preferences = JSON.parse(this.route.snapshot.queryParams.preferences);
-            this.logger.debug("Applying found preferences: ", this.preferences);
-          } catch (e) {
-            this.logger.error("Failed to parse url preferences provided");
-            this.preferences = new Preferences();
-          }
+      .then((count: number) => {
+        this.hasActivities = count > 0;
+        if (count > 0) {
+          this.findAndDisplayActivities();
+        } else {
+          this.dataSource.data = [];
+          this.hasEmptyResults = false;
+          this.initialized = true;
         }
-
-        // Get and apply data
-        this.findAndDisplayActivities();
-
-        // Set up debounced activity location refresh
-        this.activityLocationSubject$
-          .pipe(debounceTime(ActivitiesComponent.ACTIVITY_LOCATION_DEBOUNCE_TIME))
-          .subscribe(() => {
-            console.log("Refreshing activities due to new activity location detected");
-            this.findAndDisplayActivities();
-          });
       })
       .catch(error => {
-        if (error instanceof AppError && error.code === AppError.SYNC_NOT_SYNCED) {
-          this.initialized = true;
-        } else {
-          throw error;
-        }
+        throw error;
       });
 
     // Listen for syncFinished update then table if necessary.
@@ -235,6 +238,15 @@ export class ActivitiesComponent implements OnInit, OnDestroy {
         console.error("Error in new activity locations subscription:", error);
       }
     );
+
+    this.syncEventsSub = this.syncService.syncEvents$.subscribe(syncEvent => {
+      if (
+        syncEvent.fromConnectorType === ConnectorType.SOLID &&
+        (syncEvent.type === SyncEventType.ACTIVITY || syncEvent.type === SyncEventType.ACTIVITY_CONTAINER)
+      ) {
+        this.activityLocationSubject$.next("solid_activity_sync");
+      }
+    });
   }
 
   public columnsSetup(): void {
@@ -353,41 +365,61 @@ export class ActivitiesComponent implements OnInit, OnDestroy {
         }
       })
       .then((activities: Activity[]) => {
-        this.hasEmptyResults = activities.length === 0;
+        this.ngZone.run(() => {
+          this.hasActivities = activities.length > 0 || this.hasActivities;
+          this.hasEmptyResults = activities.length === 0;
 
-        // Apply paging
-        this.dataSource.paginator.pageIndex = this.preferences.pageIndex;
-        this.dataSource.paginator.pageSize = this.preferences.pageSize;
+          // Apply paging
+          this.dataSource.paginator.pageSize = this.preferences.pageSize;
+          this.dataSource.paginator.pageIndex = this.getValidPageIndex(activities.length);
 
-        // Apply sort
-        if (this.preferences.sort.active) {
-          this.dataSource.sort.active = this.preferences.sort.active;
-        }
+          // Apply sort
+          if (this.preferences.sort.active) {
+            this.dataSource.sort.active = this.preferences.sort.active;
+          }
 
-        // ...and sort direction
-        if (this.preferences.sort.direction) {
-          this.dataSource.sort.direction = this.preferences.sort.direction;
-        }
+          // ...and sort direction
+          if (this.preferences.sort.direction) {
+            this.dataSource.sort.direction = this.preferences.sort.direction;
+          }
 
-        // Apply data
-        this.dataSource.data = activities;
+          // Apply data
+          this.dataSource.data = activities;
+        });
       })
       .catch(error => {
-        const message = error.toString();
-        this.snackBar.open(message, "Close");
-        this.logger.error(message);
+        this.ngZone.run(() => {
+          const message = error.toString();
+          this.snackBar.open(message, "Close");
+          this.logger.error(message);
+        });
       })
       .finally(() => {
-        this.initialized = true;
-        this.isRefreshing = false;
+        this.ngZone.run(() => {
+          this.initialized = true;
+          this.isRefreshing = false;
 
-        // If there was a pending refresh request while we were processing, schedule it now
-        if (this.pendingRefresh) {
-          this.logger.debug("Processing pending refresh request");
-          // Use the debounced subject instead of the old timer-based approach
-          this.activityLocationSubject$.next("pending_refresh");
-        }
+          // If there was a pending refresh request while we were processing, schedule it now
+          if (this.pendingRefresh) {
+            this.logger.debug("Processing pending refresh request");
+            // Use the debounced subject instead of the old timer-based approach
+            this.activityLocationSubject$.next("pending_refresh");
+          }
+        });
       });
+  }
+
+  private getValidPageIndex(activityCount: number): number {
+    const pageSize = this.preferences.pageSize || 10;
+    const maxPageIndex = Math.max(Math.ceil(activityCount / pageSize) - 1, 0);
+    const pageIndex = Math.min(this.preferences.pageIndex, maxPageIndex);
+
+    if (pageIndex !== this.preferences.pageIndex) {
+      this.preferences.pageIndex = pageIndex;
+      this.persistPreferencesInUrl();
+    }
+
+    return pageIndex;
   }
 
   public filterDisplayedColumns(): void {
@@ -408,8 +440,9 @@ export class ActivitiesComponent implements OnInit, OnDestroy {
 
   public onSelectedColumns(): void {
     //this.verifyTablePerformance();
-    this.findAndDisplayActivities();
+    this.filterDisplayedColumns();
     this.setSavedColumns();
+    this.findAndDisplayActivities();
   }
 
   public getSavedColumns(): ActivityColumns.Column[] {
@@ -660,6 +693,10 @@ export class ActivitiesComponent implements OnInit, OnDestroy {
   }
 
   public ngOnDestroy(): void {
-    this.historyChangesSub.unsubscribe();
+    this.historyChangesSub?.unsubscribe();
+    this.newActivityLocationsSub?.unsubscribe();
+    this.syncEventsSub?.unsubscribe();
+    this.activityLocationRefreshSub?.unsubscribe();
+    this.activityNameSearchSub?.unsubscribe();
   }
 }

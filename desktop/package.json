@@ -53,12 +53,12 @@
   "license": "MPL-2.0",
   "readme": "README.md",
   "engines": {
-    "node": ">=16"
+    "node": ">=24"
   },
   "engineStrict": true,
   "dependencies": {
-    "@incremunica/query-sparql-incremental": "^2.3.0",
-    "@incremunica/user-tools": "^2.3.0",
+    "@incremunica/query-sparql-incremental": "^2.3.5",
+    "@incremunica/user-tools": "^2.3.2",
     "@thomaschampagne/sports-lib": "^6.1.1",
     "@xmldom/xmldom": "^0.8.2",
     "7zip-bin": "^5.1.1",
@@ -83,12 +83,13 @@
     "rxjs": "^7.8.1",
     "semver": "^7.6.0",
     "serialize-error": "^11.0.3",
+    "trustflows-client": "^0.1.0-alpha.0",
     "tsyringe": "^4.8.0"
   },
   "devDependencies": {
     "@types/jest": "^27.4.1",
     "@types/lodash": "^4.14.181",
-    "@types/node": "^16",
+    "@types/node": "^24",
     "@types/node-7z": "^2.1.4",
     "@types/semver": "7.3.9",
     "@typescript-eslint/eslint-plugin": "^5.18.0",

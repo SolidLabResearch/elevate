@@ -11,6 +11,7 @@ import { ElevateSport } from "@elevate/shared/enums/elevate-sport.enum";
 import { PracticeLevel } from "@elevate/shared/models/athlete/athlete-level.enum";
 import { Gender } from "@elevate/shared/models/athlete/gender.enum";
 import { AthleteModel } from "@elevate/shared/models/athlete/athlete.model";
+import { SolidConnectorInfoService } from "../../shared/services/solid-connector-info/solid-connector-info.service";
 
 @Component({
   selector: "app-athlete-settings",
@@ -64,6 +65,8 @@ export class AthleteSettingsComponent implements OnInit {
 
   public athleteModel: AthleteModel;
   public sportsCategories: { label: string; sportKeys: ElevateSport[] }[];
+  public multipleAthleteWarning: string;
+  public hasSelectedAthlete: boolean;
 
   @ViewChild("athleteForm") athleteForm: NgForm;
 
@@ -71,6 +74,7 @@ export class AthleteSettingsComponent implements OnInit {
     @Inject(AppService) public readonly appService: AppService,
     @Inject(AthleteService) private readonly athleteService: AthleteService,
     @Inject(ActivityService) private readonly activityService: ActivityService,
+    @Inject(SolidConnectorInfoService) private readonly solidConnectorInfoService: SolidConnectorInfoService,
     @Inject(MatSnackBar) private readonly snackBar: MatSnackBar,
     @Inject(LoggerService) private readonly logger: LoggerService
   ) {
@@ -78,6 +82,15 @@ export class AthleteSettingsComponent implements OnInit {
   }
 
   public ngOnInit(): void {
+    const selectedAthletes = this.solidConnectorInfoService.selectedAthleteWebIds();
+    this.hasSelectedAthlete = selectedAthletes.length > 0;
+    this.multipleAthleteWarning =
+      selectedAthletes.length > 1
+        ? `multiple athletes are selected, showing data for athlete ${selectedAthletes[0]}`
+        : null;
+    if (!this.hasSelectedAthlete) {
+      return;
+    }
     this.athleteService.fetch().then((athleteModel: AthleteModel) => {
       this.athleteModel = athleteModel;
       setTimeout(() => this.athleteForm.control.markAllAsTouched()); // Force template driven form validation

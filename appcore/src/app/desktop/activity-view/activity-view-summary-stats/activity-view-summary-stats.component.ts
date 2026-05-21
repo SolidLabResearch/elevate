@@ -1,4 +1,4 @@
-import { Component, Inject, Input, OnInit } from "@angular/core";
+import { Component, Inject, Input, OnChanges, OnInit, SimpleChanges } from "@angular/core";
 import { ActivityStatsService } from "../shared/activity-stats.service";
 import { StatDisplay } from "../shared/models/stats/display/stat-display.model";
 import { MediaObserver } from "@angular/flex-layout";
@@ -12,7 +12,7 @@ import { Activity } from "@elevate/shared/models/sync/activity.model";
   templateUrl: "./activity-view-summary-stats.component.html",
   styleUrls: ["./activity-view-summary-stats.component.scss"]
 })
-export class ActivityViewSummaryStatsComponent implements OnInit {
+export class ActivityViewSummaryStatsComponent implements OnInit, OnChanges {
   public summaryStatDisplays: StatDisplay[];
 
   public columnsCount: number;
@@ -34,6 +34,17 @@ export class ActivityViewSummaryStatsComponent implements OnInit {
   ) {}
 
   public ngOnInit(): void {
+    this.updateGridLayout();
+    this.summaryStatDisplays = this.statsService.getSummaryStats(this.activity, this.measureSystem);
+  }
+
+  public ngOnChanges(changes: SimpleChanges): void {
+    if (changes.hasMapData && !changes.hasMapData.firstChange) {
+      this.updateGridLayout();
+    }
+  }
+
+  private updateGridLayout(): void {
     this.columnsCount = this.hasMapData
       ? SummaryStatsGroup.DEFAULT_COLUMNS_COUNT
       : SummaryStatsGroup.DEFAULT_COLUMNS_COUNT * SummaryStatsGroup.DEFAULT_ROW_COUNT;
@@ -41,7 +52,5 @@ export class ActivityViewSummaryStatsComponent implements OnInit {
     this.rowCount = SummaryStatsGroup.DEFAULT_ROW_COUNT;
 
     this.rowHeight = ActivityViewMapComponent.MAP_HEIGHT_PX / SummaryStatsGroup.DEFAULT_ROW_COUNT;
-
-    this.summaryStatDisplays = this.statsService.getSummaryStats(this.activity, this.measureSystem);
   }
 }

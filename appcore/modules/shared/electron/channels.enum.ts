@@ -31,6 +31,7 @@ export enum Channel {
 
   // Activity
   computeActivity = "computeActivity",
+  computeSolidRawStreams = "computeSolidRawStreams",
   computeSplits = "computeSplits",
   findActivity = "findActivity",
   findStreams = "findStreams",
@@ -50,5 +51,7 @@ export enum Channel {
   // Others
   ipcStorage = "ipcStorage",
   stravaLink = "stravaLink",
+  solidLink = "solidLink",
+  solidAggregatorLink = "solidAggregatorLink",
   runtimeInfo = "runtimeInfo"
 }

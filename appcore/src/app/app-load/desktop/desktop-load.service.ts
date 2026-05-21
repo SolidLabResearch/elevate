@@ -6,25 +6,23 @@ import { DesktopMigrationService, UpgradeResult } from "../../desktop/migration/
 import { DataStore } from "../../shared/data-store/data-store";
 import { FileConnectorInfoService } from "../../shared/services/file-connector-info/file-connector-info.service";
 import { DesktopUpdateService } from "../../desktop/app-update/desktop-update.service";
-import { MachineService } from "../../desktop/machine/machine.service";
 import { AppRoutes } from "../../shared/models/app-routes";
 import { GotItDialogComponent } from "../../shared/dialogs/got-it-dialog/got-it-dialog.component";
 import { GotItDialogDataModel } from "../../shared/dialogs/got-it-dialog/got-it-dialog-data.model";
 import { MatDialog } from "@angular/material/dialog";
 import { Router } from "@angular/router";
-import { sleep } from "@elevate/shared/tools/sleep";
+import { SolidConnectorInfoService } from "../../shared/services/solid-connector-info/solid-connector-info.service";
+import { SolidAuthSession } from "@elevate/shared/sync/connectors/solid-connector-info.model";
 
 @Injectable()
 export class DesktopLoadService extends AppLoadService {
-  public static readonly CHECK_IN_FREQUENCY = 5 * 60 * 1000; // 5 minutes
-
   constructor(
     @Inject(DataStore) protected readonly dataStore: DataStore<object>,
     @Inject(VersionsProvider) private readonly versionsProvider: VersionsProvider,
     @Inject(DesktopUpdateService) private readonly desktopUpdateService: DesktopUpdateService,
     @Inject(DesktopMigrationService) private readonly desktopMigrationService: DesktopMigrationService,
     @Inject(FileConnectorInfoService) private readonly fsConnectorInfoService: FileConnectorInfoService,
-    @Inject(MachineService) private readonly machineService: MachineService,
+    @Inject(SolidConnectorInfoService) private readonly solidConnectorInfoService: SolidConnectorInfoService,
     @Inject(Router) private readonly router: Router,
     @Inject(MatDialog) private readonly dialog: MatDialog,
     @Inject(LoggerService) private readonly logger: LoggerService
@@ -64,18 +62,31 @@ export class DesktopLoadService extends AppLoadService {
               })
               .afterClosed()
               .toPromise()
-              .then(() => this.router.navigate([AppRoutes.athleteSettings]));
+              .then(() => this.redirectToStartupRoute(true));
+          } else {
+            this.redirectToStartupRoute();
           }
-
-          // Perform checkin at end of executions
-          sleep().then(() => {
-            // Check-in now
-            this.machineService.checkIn();
-
-            // And do it every X minutes
-            setInterval(() => this.machineService.checkIn(), DesktopLoadService.CHECK_IN_FREQUENCY);
-          });
         });
     });
+  }
+
+  private redirectToStartupRoute(useAthleteSettingsFallback: boolean = false): Promise<boolean> {
+    if (!this.hasSolidAuthSession()) {
+      if (!this.router.isActive(AppRoutes.connectors, false)) {
+        return this.router.navigate([AppRoutes.connectors]);
+      }
+      return Promise.resolve(false);
+    }
+
+    if (useAthleteSettingsFallback) {
+      return this.router.navigate([AppRoutes.athleteSettings]);
+    }
+
+    return Promise.resolve(false);
+  }
+
+  private hasSolidAuthSession(): boolean {
+    const authSession: SolidAuthSession | null = this.solidConnectorInfoService.fetch().authSession;
+    return !!authSession && !!(authSession.accessToken || authSession.idToken || authSession.refreshToken);
   }
 }

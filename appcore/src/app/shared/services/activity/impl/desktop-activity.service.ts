@@ -18,6 +18,7 @@ import { Streams } from "@elevate/shared/models/activity-data/streams.model";
 import { Channel } from "@elevate/shared/electron/channels.enum";
 import { SplitRequest } from "@elevate/shared/models/splits/split-request.model";
 import { SplitResponse } from "@elevate/shared/models/splits/split-response.model";
+import { SolidConnectorInfoService } from "../../solid-connector-info/solid-connector-info.service";
 import DesktopUserSettings = UserSettings.DesktopUserSettings;
 
 export class ActivityRecalculateNotification {
@@ -48,7 +49,8 @@ export class DesktopActivityService extends ActivityService {
     @Inject(AthleteSnapshotResolverService) public readonly athleteSnapshotResolver: AthleteSnapshotResolverService,
     @Inject(StreamsService) public readonly streamsService: StreamsService,
     @Inject(DesktopInsightsService) private readonly insightsService: DesktopInsightsService,
-    @Inject(LoggerService) protected readonly logger: LoggerService
+    @Inject(LoggerService) protected readonly logger: LoggerService,
+    @Inject(SolidConnectorInfoService) private readonly solidConnectorInfoService: SolidConnectorInfoService
   ) {
     super(activityDao, athleteSnapshotResolver, logger);
     this.recalculate$ = new Subject<ActivityRecalculateNotification>();
@@ -60,6 +62,26 @@ export class DesktopActivityService extends ActivityService {
   public recalculate$: Subject<ActivityRecalculateNotification>;
 
   public isRecalculating: boolean;
+
+  public verifyConsistencyWithAthleteSettings(): void {
+    if (this.isSolidAggregatorConfigured()) {
+      this.logger.debug("Skipping athlete settings consistency check: Solid aggregator handles recalculation");
+      this.athleteSettingsConsistency$.next(true);
+      return;
+    }
+
+    super.verifyConsistencyWithAthleteSettings();
+  }
+
+  public verifyActivitiesWithSettingsLacking(): void {
+    if (this.isSolidAggregatorConfigured()) {
+      this.logger.debug("Skipping activity settings-lack check: Solid aggregator handles recalculation");
+      this.activitiesWithSettingsLacks$.next(false);
+      return;
+    }
+
+    super.verifyActivitiesWithSettingsLacking();
+  }
 
   /**
    * Single compute of an activity
@@ -210,5 +232,9 @@ export class DesktopActivityService extends ActivityService {
     return super.removeById(id).then(() => {
       return this.streamsService.removeById(id);
     });
+  }
+
+  private isSolidAggregatorConfigured(): boolean {
+    return !!this.solidConnectorInfoService.fetch()?.aggregatorUrl;
   }
 }

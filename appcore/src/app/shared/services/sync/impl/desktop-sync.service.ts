@@ -38,6 +38,8 @@ import { AthleteModel } from "@elevate/shared/models/athlete/athlete.model";
 import { ErrorSyncEvent } from "@elevate/shared/sync/events/error-sync.event";
 import { SyncEventType } from "@elevate/shared/sync/events/sync-event-type";
 import { ActivitySyncEvent } from "@elevate/shared/sync/events/activity-sync.event";
+import { ActivityDiscoveredEvent } from "@elevate/shared/sync/events/activity-discovered.event";
+import { ActivityContainerSyncEvent } from "@elevate/shared/sync/events/activity-container-sync.event";
 import { CompleteSyncEvent } from "@elevate/shared/sync/events/complete-sync.event";
 import { UserSettings } from "@elevate/shared/models/user-settings/user-settings.namespace";
 import { MatSnackBar } from "@angular/material/snack-bar";
@@ -295,7 +297,8 @@ export class DesktopSyncService extends SyncService<ConnectorSyncDateTime[]> imp
           .then(
             (response: string) => {
               this.logger.debug("[Renderer] StartSync Main Response:", response);
-              this.isSyncing$.next(true);
+              // Solid connector runs as a long-lived stream watcher, so do not lock the whole UI as "syncing".
+              this.isSyncing$.next(this.currentConnectorType !== ConnectorType.SOLID);
               return Promise.resolve();
             },
             error => {
@@ -313,10 +316,39 @@ export class DesktopSyncService extends SyncService<ConnectorSyncDateTime[]> imp
         break;
 
       case SyncEventType.ACTIVITY:
+        if (syncEvent.fromConnectorType === ConnectorType.SOLID) {
+          const activitySyncEvent = syncEvent as ActivitySyncEvent;
+          this.logger.debug(
+            `[Renderer][Solid] ACTIVITY event received: "${activitySyncEvent.activity?.name}" (${activitySyncEvent.activity?.id})`
+          );
+        }
         this.handleActivityUpsert(syncEvents$, syncEvent as ActivitySyncEvent);
         break;
 
       case SyncEventType.DISCOVERED_ACTIVITY:
+        if (syncEvent.fromConnectorType === ConnectorType.SOLID) {
+          const discoveredEvent = syncEvent as ActivityDiscoveredEvent;
+          this.logger.debug(
+            `[Renderer][Solid] DISCOVERED activity: ${discoveredEvent.activityLocation} (${discoveredEvent.activityType})`
+          );
+        }
+        syncEvents$.next(syncEvent); // Forward for upward UI use.
+        break;
+
+      case SyncEventType.ACTIVITY_CONTAINER:
+        if (syncEvent.fromConnectorType === ConnectorType.SOLID) {
+          const containerEvent = syncEvent as ActivityContainerSyncEvent;
+          this.logger.debug(
+            `[Renderer][Solid] ACTIVITY_CONTAINER event received: ${containerEvent.activitySources.length} sources ` +
+              `(added=${containerEvent.added.length}, removed=${containerEvent.removed.length}, changed=${containerEvent.changed.length})`
+          );
+          this.activityService.activityDao.setActivityLocationsSnapshot(containerEvent.activitySources, [
+            containerEvent.containerIri,
+            ...containerEvent.added,
+            ...containerEvent.removed,
+            ...containerEvent.changed
+          ]);
+        }
         syncEvents$.next(syncEvent); // Forward for upward UI use.
         break;
 

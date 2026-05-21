@@ -305,6 +305,11 @@ export class Activity extends BareActivity {
   public athleteSnapshot: AthleteSnapshot;
 
   /**
+   * WebID of the athlete owning this activity.
+   */
+  public athleteId?: string;
+
+  /**
    * Activity stats kept from source (strava, file, ...)
    */
   public srcStats?: Partial<ActivityStats>;

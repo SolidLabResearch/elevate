@@ -2,6 +2,9 @@ import { DayFitnessTrendModel } from "./day-fitness-trend.model";
 import { DayStressModel } from "./day-stress.model";
 import { TrainingZone } from "../enums/training-zone.enum";
 import { ElevateSport } from "@elevate/shared/enums/elevate-sport.enum";
+import { AthleteSnapshot } from "@elevate/shared/models/athlete/athlete-snapshot.model";
+import { Gender } from "@elevate/shared/models/athlete/gender.enum";
+import { AthleteSettings } from "@elevate/shared/models/athlete/athlete-settings/athlete-settings.model";
 
 describe("DayFitnessTrendModel", () => {
   it("should provide overload training zone (1)", done => {
@@ -288,6 +291,27 @@ describe("DayFitnessTrendModel", () => {
     expect(result).not.toBeNull();
 
     expect(result).toEqual(expectedResult);
+    done();
+  });
+
+  it("should print athlete settings without LTHR when snapshot has no LTHR settings", done => {
+    // Given
+    const previewDay = false;
+    const date = new Date();
+    const dayStressModel: DayStressModel = new DayStressModel(date, previewDay);
+    dayStressModel.heartRateStressScore = 42;
+    dayStressModel.athleteSnapshot = new AthleteSnapshot(
+      Gender.MEN,
+      30,
+      new AthleteSettings(190, 65, undefined, null, null, null, 70)
+    );
+    const dayFitnessTrendModel: DayFitnessTrendModel = new DayFitnessTrendModel(dayStressModel, 10, 20, 30);
+
+    // When
+    const result: string = dayFitnessTrendModel.printAthleteSettings();
+
+    // Then
+    expect(result).toEqual("MaxHr 190bpm. RestHr 65bpm. Weight 70kg.");
     done();
   });
 });

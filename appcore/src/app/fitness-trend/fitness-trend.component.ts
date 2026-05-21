@@ -18,6 +18,7 @@ import { LoggerService } from "../shared/services/logging/logger.service";
 import { Subscription } from "rxjs";
 import { AppService } from "../shared/services/app-service/app.service";
 import { ActivityService } from "../shared/services/activity/activity.service";
+import { SolidConnectorInfoService } from "../shared/services/solid-connector-info/solid-connector-info.service";
 
 @Component({
   selector: "app-fitness-trend",
@@ -67,12 +68,15 @@ export class FitnessTrendComponent implements OnInit, OnDestroy {
   public hasActivities: boolean = null; // Can be null: don't know yet true/false status on load
   public areActivitiesCompliant: boolean = null; // Can be null: don't know yet true/false status on load
   public historyChangesSub: Subscription;
+  public multipleAthleteWarning: string;
+  private primaryAthleteId: string;
 
   constructor(
     @Inject(AppService) private readonly appService: AppService,
     @Inject(ActivityService) private readonly activityService: ActivityService,
     @Inject(SyncService) private readonly syncService: SyncService<any>,
     @Inject(FitnessService) private readonly fitnessService: FitnessService,
+    @Inject(SolidConnectorInfoService) private readonly solidConnectorInfoService: SolidConnectorInfoService,
     @Inject(MatDialog) private readonly dialog: MatDialog,
     @Inject(MatSnackBar) private readonly snackBar: MatSnackBar,
     @Inject(LoggerService) private readonly logger: LoggerService
@@ -206,8 +210,11 @@ export class FitnessTrendComponent implements OnInit, OnDestroy {
   }
 
   public initialize(): Promise<void> {
+    this.updateAthleteSelectionWarning();
     return this.activityService
-      .count()
+      .count(
+        this.primaryAthleteId ? { boundKeys: [{ key: "activity_athleteId", value: this.primaryAthleteId }] } : undefined
+      )
       .then((count: number) => {
         this.hasActivities = count > 0;
         return this.hasActivities
@@ -240,7 +247,8 @@ export class FitnessTrendComponent implements OnInit, OnDestroy {
           this.fitnessTrendConfigModel,
           this.isPowerMeterEnabled,
           this.isSwimEnabled,
-          this.skipActivityTypes
+          this.skipActivityTypes,
+          this.primaryAthleteId
         );
       })
       .then(
@@ -394,7 +402,13 @@ export class FitnessTrendComponent implements OnInit, OnDestroy {
 
   public reloadFitnessTrend(): void {
     this.fitnessService
-      .computeTrend(this.fitnessTrendConfigModel, this.isPowerMeterEnabled, this.isSwimEnabled, this.skipActivityTypes)
+      .computeTrend(
+        this.fitnessTrendConfigModel,
+        this.isPowerMeterEnabled,
+        this.isSwimEnabled,
+        this.skipActivityTypes,
+        this.primaryAthleteId
+      )
       .then(
         (fitnessTrend: DayFitnessTrendModel[]) => {
           this.fitnessTrend = fitnessTrend;
@@ -402,6 +416,15 @@ export class FitnessTrendComponent implements OnInit, OnDestroy {
         },
         (appError: AppError) => this.logger.error(appError.toString())
       );
+  }
+
+  private updateAthleteSelectionWarning(): void {
+    const selectedAthletes = this.solidConnectorInfoService.selectedAthleteWebIds();
+    this.primaryAthleteId = selectedAthletes[0] || null;
+    this.multipleAthleteWarning =
+      selectedAthletes.length > 1
+        ? `multiple athletes are selected, showing data for athlete ${this.primaryAthleteId}`
+        : null;
   }
 
   public updateSkipActivityTypes(isEBikeRidesEnabled: boolean): void {

@@ -5,6 +5,11 @@
 
 <app-activities-required></app-activities-required>
 
+<div *ngIf="multipleAthleteWarning" fxLayout="row" fxLayoutAlign="center center" class="mat-caption warn-color">
+  <mat-icon color="warn" fontSet="material-icons-outlined" inline="true">warning</mat-icon>
+  {{multipleAthleteWarning}}
+</div>
+
 <mat-card *ngIf="hasActivities === false">
   <app-fitness-trend-user-guide [readMore]="false"></app-fitness-trend-user-guide>
 </mat-card>

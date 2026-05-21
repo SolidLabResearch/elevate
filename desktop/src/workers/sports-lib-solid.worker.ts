@@ -8,7 +8,9 @@ export interface SportsLibSolidWorkerParams {
   srcFileType: ActivityFileType;
 }
 
-SportsLibProcessor.processString(workerData.activityFileBuffer, workerData.srcFileType)
+const activityFileBuffer = Buffer.from(workerData.activityFileBuffer);
+
+SportsLibProcessor.processString(activityFileBuffer as unknown as ArrayBuffer, workerData.srcFileType)
   .then(result => {
     parentPort.postMessage({ data: result });
   })

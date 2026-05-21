@@ -9,12 +9,10 @@ module.exports = {
   coverageReporters: ["html"],
   coverageDirectory: "coverage/",
   transform: {
-    '^.+\\.(ts|js|mjs|html)$': 'jest-preset-angular',
+    "^.+\\.(ts|js|mjs|html)$": "<rootDir>/jest-preset-angular-transformer.js"
   },
-  transformIgnorePatterns: [
-    'node_modules/(?!(@angular|@ngrx|ngx-|angular-|@inrupt|jose)/)',
-  ],
-  moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node', 'mjs'],
+  transformIgnorePatterns: ["node_modules/(?!(@angular|@ngrx|ngx-|angular-|jose|trustflows-client)/)"],
+  moduleFileExtensions: ["ts", "tsx", "js", "jsx", "json", "node", "mjs"],
   setupFiles: ["<rootDir>/src/test-setup.js"],
-  testTimeout: 10000,
+  testTimeout: 10000
 };

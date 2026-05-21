@@ -19,6 +19,7 @@ import { ActivityStatsService } from "./shared/activity-stats.service";
 import { ActivitySensorsService } from "./shared/activity-sensors.service";
 import { ActivityEditDialogComponent } from "./activity-edit/activity-edit-dialog.component";
 import { ActivityViewMapComponent } from "./activity-view-map/activity-view-map.component";
+import { SolidConnectorService } from "../connectors/solid-connector/solid-connector.service";
 
 PlotlyModule.plotlyjs = PlotlyJS;
 
@@ -38,6 +39,12 @@ PlotlyModule.plotlyjs = PlotlyJS;
     ActivityViewStatsComponent,
     ActivityEditDialogComponent
   ],
-  providers: [ActivityViewService, ActivitySensorsService, ActivityStatsService, TimeInZonesService]
+  providers: [
+    ActivityViewService,
+    ActivitySensorsService,
+    ActivityStatsService,
+    TimeInZonesService,
+    SolidConnectorService
+  ]
 })
 export class ActivityViewModule {}

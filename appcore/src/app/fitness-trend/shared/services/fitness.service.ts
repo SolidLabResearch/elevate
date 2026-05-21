@@ -24,7 +24,8 @@ export class FitnessService {
     fitnessTrendConfigModel: FitnessTrendConfigModel,
     powerMeterEnable: boolean,
     swimEnable: boolean,
-    skipActivityTypes?: string[]
+    skipActivityTypes?: string[],
+    athleteId?: string
   ): Promise<FitnessPreparedActivityModel[]> {
     return new Promise(
       (resolve: (result: FitnessPreparedActivityModel[]) => void, reject: (error: AppError) => void) => {
@@ -45,10 +46,18 @@ export class FitnessService {
             });
           });
         }
+        if (athleteId) {
+          filterKeys.push({
+            key: "activity_athleteId",
+            relationKeyToValue: "=",
+            value: athleteId
+          });
+        }
         return this.activityService
           .find({
             keys: [
               "activity_name",
+              "activity_athleteId",
               "activity_startTime",
               "activity_type",
               "activity_flags",
@@ -203,10 +212,11 @@ export class FitnessService {
     fitnessTrendConfigModel: FitnessTrendConfigModel,
     powerMeterEnable: boolean,
     swimEnable: boolean,
-    skipActivityTypes?: string[]
+    skipActivityTypes?: string[],
+    athleteId?: string
   ): Promise<DayStressModel[]> {
     return new Promise((resolve: (activityDays: DayStressModel[]) => void, reject: (error: string) => void) => {
-      this.prepare(fitnessTrendConfigModel, powerMeterEnable, swimEnable, skipActivityTypes).then(
+      this.prepare(fitnessTrendConfigModel, powerMeterEnable, swimEnable, skipActivityTypes, athleteId).then(
         (fitnessPreparedActivities: FitnessPreparedActivityModel[]) => {
           // Subtract 1 day to the first activity done in history:
           // Goal is to show graph point with 1 day before
@@ -251,10 +261,17 @@ export class FitnessService {
     fitnessTrendConfigModel: FitnessTrendConfigModel,
     isPowerMeterEnabled: boolean,
     isSwimEnabled: boolean,
-    skipActivityTypes?: string[]
+    skipActivityTypes?: string[],
+    athleteId?: string
   ): Promise<DayFitnessTrendModel[]> {
     return new Promise((resolve: (fitnessTrend: DayFitnessTrendModel[]) => void, reject: (error: string) => void) => {
-      this.generateDailyStress(fitnessTrendConfigModel, isPowerMeterEnabled, isSwimEnabled, skipActivityTypes).then(
+      this.generateDailyStress(
+        fitnessTrendConfigModel,
+        isPowerMeterEnabled,
+        isSwimEnabled,
+        skipActivityTypes,
+        athleteId
+      ).then(
         (dailyActivity: DayStressModel[]) => {
           let ctl;
           let atl;

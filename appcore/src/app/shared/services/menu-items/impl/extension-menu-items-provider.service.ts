@@ -36,16 +36,6 @@ export class ExtensionMenuItemsProvider implements MenuItemsProvider {
       routerLinkActive: true
     },
     {
-      icon: "support",
-      routerLink: AppRoutes.help,
-      routerLinkActive: true
-    },
-    {
-      icon: "favorite_border",
-      routerLink: AppRoutes.donate,
-      routerLinkActive: true
-    },
-    {
       icon: "get_app",
       iconClass: "warn",
       routerLink: AppRoutes.downloadDesktopApp,

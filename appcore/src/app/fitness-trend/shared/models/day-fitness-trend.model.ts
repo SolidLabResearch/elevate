@@ -178,51 +178,43 @@ export class DayFitnessTrendModel extends DayStressModel {
   }
 
   public printAthleteSettings(): string {
-    if (!this.athleteSnapshot) {
+    if (!this.athleteSnapshot || !this.athleteSnapshot.athleteSettings) {
       return null;
     }
 
     let inlineSettings = "";
+    const athleteSettings = this.athleteSnapshot.athleteSettings;
+    const lthr = athleteSettings.lthr;
 
     if (_.isNumber(this.heartRateStressScore) || _.isNumber(this.trainingImpulseScore)) {
-      inlineSettings += "MaxHr " + this.athleteSnapshot.athleteSettings.maxHr + "bpm. ";
-      inlineSettings += "RestHr " + this.athleteSnapshot.athleteSettings.restHr + "bpm. ";
+      inlineSettings += "MaxHr " + athleteSettings.maxHr + "bpm. ";
+      inlineSettings += "RestHr " + athleteSettings.restHr + "bpm. ";
 
-      if (
-        this.athleteSnapshot.athleteSettings.lthr.default ||
-        this.athleteSnapshot.athleteSettings.lthr.cycling ||
-        this.athleteSnapshot.athleteSettings.lthr.running
-      ) {
+      if (lthr && (lthr.default || lthr.cycling || lthr.running)) {
         let lthrStr = "Lthr ";
 
-        lthrStr += this.athleteSnapshot.athleteSettings.lthr.default
-          ? "D:" + this.athleteSnapshot.athleteSettings.lthr.default + "bpm, "
-          : "";
-        lthrStr += this.athleteSnapshot.athleteSettings.lthr.cycling
-          ? "C:" + this.athleteSnapshot.athleteSettings.lthr.cycling + "bpm, "
-          : "";
-        lthrStr += this.athleteSnapshot.athleteSettings.lthr.running
-          ? "R:" + this.athleteSnapshot.athleteSettings.lthr.running + "bpm, "
-          : "";
+        lthrStr += lthr.default ? "D:" + lthr.default + "bpm, " : "";
+        lthrStr += lthr.cycling ? "C:" + lthr.cycling + "bpm, " : "";
+        lthrStr += lthr.running ? "R:" + lthr.running + "bpm, " : "";
         lthrStr = lthrStr.slice(0, -2);
 
         inlineSettings += lthrStr + ". ";
       }
     }
 
-    if (_.isNumber(this.powerStressScore) && this.athleteSnapshot.athleteSettings.cyclingFtp) {
-      inlineSettings += "Cycling Ftp " + this.athleteSnapshot.athleteSettings.cyclingFtp + "w. ";
+    if (_.isNumber(this.powerStressScore) && athleteSettings.cyclingFtp) {
+      inlineSettings += "Cycling Ftp " + athleteSettings.cyclingFtp + "w. ";
     }
 
-    if (_.isNumber(this.runningStressScore) && this.athleteSnapshot.athleteSettings.runningFtp) {
-      inlineSettings += "Run Ftp " + this.athleteSnapshot.athleteSettings.runningFtp + "s/km. ";
+    if (_.isNumber(this.runningStressScore) && athleteSettings.runningFtp) {
+      inlineSettings += "Run Ftp " + athleteSettings.runningFtp + "s/km. ";
     }
 
-    if (_.isNumber(this.swimStressScore) && this.athleteSnapshot.athleteSettings.swimFtp) {
-      inlineSettings += "Swim Ftp " + this.athleteSnapshot.athleteSettings.swimFtp + "m/min. ";
+    if (_.isNumber(this.swimStressScore) && athleteSettings.swimFtp) {
+      inlineSettings += "Swim Ftp " + athleteSettings.swimFtp + "m/min. ";
     }
 
-    inlineSettings += "Weight " + this.athleteSnapshot.athleteSettings.weight + "kg.";
+    inlineSettings += "Weight " + athleteSettings.weight + "kg.";
 
     return inlineSettings;
   }

@@ -1,6 +1,15 @@
 <div class="centered-section">
+  <div *ngIf="multipleAthleteWarning" fxLayout="row" fxLayoutAlign="center center" class="mat-caption warn-color">
+    <mat-icon color="warn" fontSet="material-icons-outlined" inline="true">warning</mat-icon>
+    {{multipleAthleteWarning}}
+  </div>
+
+  <mat-card *ngIf="hasSelectedAthlete === false">
+    <mat-card-content>No athlete selected.</mat-card-content>
+  </mat-card>
+
   <!--Gender-->
-  <mat-card *ngIf="(athleteModel && athleteModel.gender)" class="gender-card">
+  <mat-card *ngIf="hasSelectedAthlete && (athleteModel && athleteModel.gender)" class="gender-card">
     <mat-card-title>
       About Me
     </mat-card-title>
@@ -82,6 +91,6 @@
   </mat-card>
 
   <!--Dated Athlete Settings manager component-->
-  <app-dated-athlete-settings-manager
+  <app-dated-athlete-settings-manager *ngIf="hasSelectedAthlete"
     (datedAthleteSettingsChange)="onDatedAthleteSettingsChanged()"></app-dated-athlete-settings-manager>
 </div>

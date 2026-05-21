@@ -27,13 +27,15 @@ import { UserSettings } from "@elevate/shared/models/user-settings/user-settings
 import { ConnectorType } from "@elevate/shared/sync/connectors/connector-type.enum";
 import { WarningException } from "@elevate/shared/exceptions/warning.exception";
 import { MeasureSystem } from "@elevate/shared/enums/measure-system.enum";
-import { ProcessStreamMode } from "@elevate/shared/sync/compute/stream-processor";
+import { ProcessStreamMode, StreamProcessor } from "@elevate/shared/sync/compute/stream-processor";
 import { Activity, ACTIVITY_FLAGS_DESC_MAP, ActivityFlag } from "@elevate/shared/models/sync/activity.model";
 import { ActivityComputer } from "@elevate/shared/sync/compute/activity-computer";
 import { ElevateSport } from "@elevate/shared/enums/elevate-sport.enum";
 import { Streams } from "@elevate/shared/models/activity-data/streams.model";
 import { Time } from "@elevate/shared/tools/time";
 import { Constant } from "@elevate/shared/constants/constant";
+import { SolidConnectorService } from "../connectors/solid-connector/solid-connector.service";
+import { DeflatedActivityStreams } from "@elevate/shared/models/sync/deflated-activity.streams";
 import DesktopUserSettings = UserSettings.DesktopUserSettings;
 
 @Component({
@@ -49,6 +51,7 @@ export class ActivityViewComponent implements OnInit, OnDestroy {
     @Inject(StreamsService) protected readonly streamsService: StreamsService,
     @Inject(OPEN_RESOURCE_RESOLVER) protected readonly openResourceResolver: DesktopOpenResourceResolver,
     @Inject(ActivityViewService) private readonly activityViewService: ActivityViewService,
+    @Inject(SolidConnectorService) private readonly solidConnectorService: SolidConnectorService,
     @Inject(Router) protected readonly router: Router,
     @Inject(MatSnackBar) protected readonly snackBar: MatSnackBar,
     @Inject(Location) private location: Location,
@@ -99,9 +102,15 @@ export class ActivityViewComponent implements OnInit, OnDestroy {
   public ngOnInit(): void {
     // Fetch activity to display from id
     const activityId = this.route.snapshot.params.id;
+    const activityOpenStartedAt = Date.now();
+    console.info("[ActivityViewTiming] open started", { activityId });
     this.activityService
       .getById(activityId)
       .then((activity: Activity) => {
+        console.info("[ActivityViewTiming] activity loaded", {
+          activityId,
+          elapsedMs: Date.now() - activityOpenStartedAt
+        });
         if (!activity) {
           this.onBack();
           return Promise.reject(new WarningException("Unknown activity"));
@@ -118,20 +127,26 @@ export class ActivityViewComponent implements OnInit, OnDestroy {
         return this.userSettingsService.fetch();
       })
       .then((userSettings: DesktopUserSettings) => {
+        console.info("[ActivityViewTiming] user settings loaded", {
+          activityId,
+          elapsedMs: Date.now() - activityOpenStartedAt
+        });
         this.userSettings = userSettings;
         this.athleteSnapshotDisplay = this.formatAthleteSnapshot(this.activity, this.userSettings.systemUnit);
 
         // Fetch associated stream if exists
-        return this.streamsService.getProcessedById(ProcessStreamMode.DISPLAY, this.activity.id, {
-          type: this.activity.type,
-          hasPowerMeter: this.activity.hasPowerMeter,
-          isSwimPool: this.activity.isSwimPool,
-          athleteSnapshot: this.activity.athleteSnapshot
-        });
+        return this.getActivityDisplayStreams();
       })
       .then((streams: Streams) => {
         this.streams = streams;
         this.hasMapData = streams?.latlng?.length > 0;
+        console.info("[ActivityViewTiming] streams ready", {
+          activityId,
+          elapsedMs: Date.now() - activityOpenStartedAt,
+          hasStreams: Boolean(streams),
+          hasMapData: this.hasMapData,
+          latLngCount: streams?.latlng?.length || 0
+        });
 
         this.logger.debug("Activity", this.activity);
         this.logger.debug("Streams", this.streams);
@@ -144,6 +159,77 @@ export class ActivityViewComponent implements OnInit, OnDestroy {
 
     // (Debug) Displays "on map statistics" activity data on graph bound selection
     this.setupDisplayDebugStatsOnSelectedBounds();
+  }
+
+  private getActivityDisplayStreams(): Promise<Streams> {
+    if (this.activity.isSwimPool) {
+      console.info("[ActivityViewTiming] skip stream load for pool swim", { activityId: this.activity.id });
+      return Promise.resolve(null);
+    }
+
+    const streamProcessorParams = {
+      type: this.activity.type,
+      hasPowerMeter: this.activity.hasPowerMeter,
+      isSwimPool: this.activity.isSwimPool,
+      athleteSnapshot: this.activity.athleteSnapshot
+    };
+
+    const localStreamsStartedAt = Date.now();
+    return this.streamsService
+      .getProcessedById(ProcessStreamMode.DISPLAY, this.activity.id, streamProcessorParams)
+      .then(streams => {
+        console.info("[ActivityViewTiming] local stream lookup completed", {
+          activityId: this.activity.id,
+          elapsedMs: Date.now() - localStreamsStartedAt,
+          found: Boolean(streams),
+          latLngCount: streams?.latlng?.length || 0
+        });
+        if (streams || this.activity.connector !== ConnectorType.SOLID || !this.activity.extras?.file?.path) {
+          return streams;
+        }
+
+        const solidStreamsStartedAt = Date.now();
+        return this.solidConnectorService.getDeflatedStreamsForActivity(this.activity).then(deflatedStreams => {
+          console.info("[ActivityViewTiming] Solid raw stream load completed", {
+            activityId: this.activity.id,
+            elapsedMs: Date.now() - solidStreamsStartedAt,
+            hasDeflatedStreams: Boolean(deflatedStreams),
+            deflatedSize: deflatedStreams?.length || 0
+          });
+          if (!deflatedStreams) {
+            return null;
+          }
+
+          const cacheStartedAt = Date.now();
+          return this.streamsService
+            .put(new DeflatedActivityStreams(`${this.activity.id}`, deflatedStreams))
+            .then(() => {
+              console.info("[ActivityViewTiming] local stream cache write completed", {
+                activityId: this.activity.id,
+                elapsedMs: Date.now() - cacheStartedAt
+              });
+              const inflateStartedAt = Date.now();
+              const rawStreams = Streams.inflate(deflatedStreams);
+              console.info("[ActivityViewTiming] stream inflate completed", {
+                activityId: this.activity.id,
+                elapsedMs: Date.now() - inflateStartedAt,
+                latLngCount: rawStreams?.latlng?.length || 0
+              });
+              const processStartedAt = Date.now();
+              const displayStreams = StreamProcessor.handle(
+                ProcessStreamMode.DISPLAY,
+                streamProcessorParams,
+                rawStreams
+              );
+              console.info("[ActivityViewTiming] display stream processing completed", {
+                activityId: this.activity.id,
+                elapsedMs: Date.now() - processStartedAt,
+                latLngCount: displayStreams?.latlng?.length || 0
+              });
+              return displayStreams;
+            });
+        });
+      });
   }
 
   public onEditActivity(): void {

@@ -428,6 +428,7 @@ export namespace ActivityColumns {
       new DateColumn(Category.COMMON, ["startTime"], "Date").setWidth("150px").setDefault(true),
       new ActivityLinkColumn(Category.COMMON, ["name"]).setWidth("285px").setDefault(true),
       new TextColumn(Category.COMMON, ["type"]).setDefault(true),
+      new TextColumn(Category.COMMON, ["athleteId"], null, "athletesID").setWidth("240px").setDefault(true),
       new NumberColumn(Category.COMMON, ["stats", "movingTime"], null, "Moving Time", Print.time).setDefault(true),
       new NumberColumn(Category.COMMON, ["stats", "elapsedTime"], null, "Total Time", Print.time),
       new NumberColumn(

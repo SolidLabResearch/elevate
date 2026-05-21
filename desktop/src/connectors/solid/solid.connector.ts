@@ -82,6 +82,7 @@ import {
 import { ErrorSyncEvent } from "@elevate/shared/sync/events/error-sync.event";
 import { BareActivity } from "@elevate/shared/models/sync/bare-activity.model";
 import { ActivitySyncEvent } from "@elevate/shared/sync/events/activity-sync.event";
+import { ActivityContainerSyncEvent } from "@elevate/shared/sync/events/activity-container-sync.event";
 import { ActivityFileType } from "@elevate/shared/sync/connectors/activity-file-type.enum";
 import { ActivityComputer } from "@elevate/shared/sync/compute/activity-computer";
 import { Streams } from "@elevate/shared/models/activity-data/streams.model";
@@ -93,11 +94,41 @@ import { SportsLibSolidWorkerParams } from "../../workers/sports-lib-solid.worke
 import fetch from "cross-fetch";
 import { AsyncIterator } from "asynciterator";
 import { ActivityDiscoveredEvent } from "@elevate/shared/sync/events/activity-discovered.event";
+import { Auth } from "trustflows-client";
+import { SolidAuthSession } from "@elevate/shared/sync/connectors/solid-connector-info.model";
+import { UmaAccessRequest } from "@elevate/shared/sync/uma/uma-access-request";
+import { ActivityRDFMapper } from "../../../../appcore/src/app/shared/dao/activity/activityRDFMapper";
+import { activityRdfFetchCache } from "../../../../appcore/src/app/shared/dao/activity/rdf-fetch-cache";
+
+interface UmaChallenge {
+  asUri: string | null;
+  ticket: string | null;
+}
+
+interface UmaMetadata {
+  token_endpoint?: string;
+  claim_token_formats_supported?: string[];
+}
+
+interface UmaTokenResponse {
+  access_token?: string;
+  token_type?: string;
+  expires_in?: number;
+}
+
+interface CachedUmaToken {
+  accessToken: string;
+  tokenType: string;
+  expiresAt: number | null;
+}
 
 @singleton()
 export class SolidConnector extends BaseConnector {
   private static readonly SLEEP_TIME_BETWEEN_FILE_PARSED: number = 5;
   private static readonly BUFFER_SIZE: number = 10;
+  private static readonly ID_TOKEN_CLAIM_FORMAT = "http://openid.net/specs/openid-connect-core-1_0.html#IDToken";
+  private static readonly UMA_TOKEN_EXPIRY_SKEW_MS = 5000;
+  private static sharedQueryEngine: QueryEngine | null = null;
 
   private static HumanizedDayMoment = class {
     private static readonly SPLIT_AFTERNOON_AT = 12;
@@ -238,6 +269,10 @@ export class SolidConnector extends BaseConnector {
   private solidConnectorConfig: SolidConnectorConfig;
   private engine: QueryEngine;
   private activeIterator: AsyncIterator<any> | undefined;
+  private authFetch: typeof globalThis.fetch;
+  private requestedAccessKeys: Set<string>;
+  private umaTokenCache: Map<string, CachedUmaToken>;
+  private umaMetadataCache: Map<string, Promise<UmaMetadata>>;
 
   private readonly unknownDevicesReasonsIds: string[];
 
@@ -253,13 +288,28 @@ export class SolidConnector extends BaseConnector {
     this.type = ConnectorType.SOLID;
     this.enabled = SolidConnector.ENABLED;
     this.unknownDevicesReasonsIds = [];
+    this.authFetch = fetch as unknown as typeof globalThis.fetch;
+    this.requestedAccessKeys = new Set<string>();
+    this.umaTokenCache = new Map<string, CachedUmaToken>();
+    this.umaMetadataCache = new Map<string, Promise<UmaMetadata>>();
   }
 
   public configure(solidConnectorConfig: SolidConnectorConfig): this {
     super.configure(solidConnectorConfig);
     this.solidConnectorConfig = solidConnectorConfig;
-    this.engine = new QueryEngine();
+    this.engine = SolidConnector.getSharedQueryEngine();
+    activityRdfFetchCache.clear();
+    this.umaTokenCache.clear();
+    this.umaMetadataCache.clear();
+    this.initializeAuthFetch();
     return this;
+  }
+
+  private static getSharedQueryEngine(): QueryEngine {
+    if (!SolidConnector.sharedQueryEngine) {
+      SolidConnector.sharedQueryEngine = new QueryEngine();
+    }
+    return SolidConnector.sharedQueryEngine;
   }
 
   public stop(): Promise<void> {
@@ -279,13 +329,29 @@ export class SolidConnector extends BaseConnector {
       this.syncEvents$.next(new StartedSyncEvent(ConnectorType.SOLID));
       this.isSyncing = true;
     }
+
+    if (this.solidConnectorConfig.info.aggregatorUrl) {
+      this.syncAggregatedActivities();
+      return this.syncEvents$;
+    }
+
+    const selectedBases = this.getSelectedBases();
+    if (selectedBases.length === 0) {
+      this.logger.info("Solid sync skipped because no athlete WebID is selected.");
+      return this.syncEvents$;
+    }
+
+    const primaryBase = selectedBases[0];
     this.engine
       .queryBindings(`PREFIX ldp: <http://www.w3.org/ns/ldp#> SELECT * WHERE { ?this ldp:contains ?source . }`, {
-        sources: [this.solidConnectorConfig.info.base + "/activities/"],
-        lenient: true
+        sources: [`${primaryBase}/activities/`],
+        lenient: true,
+        fetch: (input: RequestInfo | URL, init?: RequestInit) =>
+          activityRdfFetchCache.fetch(this.fetchWithAuth.bind(this), input, init)
       })
       .then(sourcesStream => {
-        const rawActivitiesIRI = `${this.solidConnectorConfig.info.base}/raw-activities/`;
+        const rawActivitiesIRI = `${primaryBase}/raw-activities/`;
+        this.logger.info(`Solid sync started. Watching raw activity container: ${rawActivitiesIRI}`);
         const sourcesToCalculateIterator = new AsyncIterator<string>();
         const sourcesToCalculateBuffer = new Set<string>();
         sourcesToCalculateIterator.readable = false;
@@ -328,23 +394,29 @@ SELECT ?originalSource WHERE {
                     timeoutId = setTimeout(() => {
                       sourcesToCalculateIterator.readable = true;
                     }, 1000);
-                    this.logger.info(bindings.toString());
+                    this.logger.info(`Activities container update: ${bindings.toString()}`);
                     return bindings;
                   }),
                   ["source"]
                 )
               ],
-              lenient: true
+              lenient: true,
+              fetch: (input: RequestInfo | URL, init?: RequestInit) =>
+                activityRdfFetchCache.fetch(this.fetchWithAuth.bind(this), input, init)
             }
           )
           .then(async bindingsStream => {
             bindingsStream.on("data", bindings => {
               const source: string = bindings.get("originalSource").value;
+              const eventType = isAddition(bindings) ? "added" : "removed";
               if (isAddition(bindings)) {
                 sourcesToCalculateBuffer.add(source);
               } else {
                 sourcesToCalculateBuffer.delete(source);
               }
+              this.logger.info(
+                `Raw activity candidate ${eventType}: ${source} (pending conversions: ${sourcesToCalculateBuffer.size})`
+              );
               if (timeoutId) {
                 clearTimeout(timeoutId);
               }
@@ -360,15 +432,18 @@ SELECT ?originalSource WHERE {
             });
             const activityIterator = sourcesToCalculateIterator
               .map(path => {
-                if (path.endsWith(".fit")) {
+                this.logger.info(`Processing raw activity candidate: ${path}`);
+                const normalizedPath = path.toLowerCase();
+                if (normalizedPath.endsWith(".fit")) {
                   return { path: path, fileType: ActivityFileType.FIT };
                 }
-                if (path.endsWith(".gpx")) {
+                if (normalizedPath.endsWith(".gpx")) {
                   return { path: path, fileType: ActivityFileType.GPX };
                 }
-                if (path.endsWith(".tcx")) {
+                if (normalizedPath.endsWith(".tcx")) {
                   return { path: path, fileType: ActivityFileType.TCX };
                 }
+                this.logger.warn(`Skipping raw activity candidate with unsupported extension: ${path}`);
                 return null;
               })
               .transform({
@@ -382,10 +457,18 @@ SELECT ?originalSource WHERE {
                     location: string;
                   }) => void
                 ) => {
+                  if (!data) {
+                    done();
+                    return;
+                  }
                   this.syncEvents$.next(
                     new ActivityDiscoveredEvent(ConnectorType.SOLID, null, data.fileType, data.path)
                   );
-                  push({ responsePromise: fetch(data.path), fileType: data.fileType, location: data.path });
+                  push({
+                    responsePromise: this.fetchWithAuth(data.path),
+                    fileType: data.fileType,
+                    location: data.path
+                  });
                   done();
                 }
               })
@@ -399,16 +482,30 @@ SELECT ?originalSource WHERE {
                     activitySolid: ActivitySolid;
                   }) => void
                 ) => {
-                  data.responsePromise.then(async response => {
-                    const activitySolid = new ActivitySolid(
-                      data.fileType,
-                      data.location,
-                      await response.arrayBuffer(),
-                      new Date(response.headers.get("last-modified"))
-                    );
-                    push({ sportsLibEventPromise: this.computeSportsLibEvent(activitySolid), activitySolid });
-                    done();
-                  });
+                  data.responsePromise
+                    .then(async response => {
+                      if (!response.ok) {
+                        this.logger.error(
+                          `Unable to fetch raw Solid activity file "${data.location}": ${response.status} ${response.statusText}`
+                        );
+                        done();
+                        return;
+                      }
+
+                      this.logger.info(`Fetched raw Solid activity file "${data.location}" successfully.`);
+                      const activitySolid = new ActivitySolid(
+                        data.fileType,
+                        data.location,
+                        await response.arrayBuffer(),
+                        new Date(response.headers.get("last-modified"))
+                      );
+                      push({ sportsLibEventPromise: this.computeSportsLibEvent(activitySolid), activitySolid });
+                      done();
+                    })
+                    .catch(error => {
+                      this.logger.error(`Unable to fetch raw Solid activity file "${data.location}"`, error);
+                      done();
+                    });
                 }
               })
               .transform({
@@ -421,13 +518,21 @@ SELECT ?originalSource WHERE {
                   done: () => void,
                   push: (i: { activity: ActivityJSONInterface; activitySolid: ActivitySolid }) => void
                 ) => {
-                  data.sportsLibEventPromise.then(result => {
-                    result.logsInfo.forEach(log => this.logger.info(log));
-                    for (const activity of result.event.activities) {
-                      push({ activity, activitySolid: data.activitySolid });
-                    }
-                    done();
-                  });
+                  data.sportsLibEventPromise
+                    .then(result => {
+                      result.logsInfo.forEach(log => this.logger.info(log));
+                      for (const activity of result.event.activities) {
+                        push({ activity, activitySolid: data.activitySolid });
+                      }
+                      done();
+                    })
+                    .catch(error => {
+                      this.logger.error(
+                        `Unable to parse raw Solid activity file "${data.activitySolid.location}"`,
+                        error
+                      );
+                      done();
+                    });
                 }
               })
               .transform({
@@ -445,6 +550,7 @@ SELECT ?originalSource WHERE {
                   const sportsLibActivity = data.activity;
                   if (sportsLibActivity && sportsLibActivity.type === ActivityTypes.Transition) {
                     done();
+                    return;
                   }
 
                   // Create bare activity from "sports-lib" activity
@@ -506,6 +612,9 @@ SELECT ?originalSource WHERE {
               while (resultPromise) {
                 try {
                   const { computedActivity, deflatedStreams } = await resultPromise;
+                  this.logger.info(
+                    `Computed Solid activity "${computedActivity?.name}" (${computedActivity?.id}) from raw source.`
+                  );
                   this.syncEvents$.next(
                     new ActivitySyncEvent(ConnectorType.SOLID, null, computedActivity, true, deflatedStreams)
                   );
@@ -519,9 +628,518 @@ SELECT ?originalSource WHERE {
             readIterator();
             activityIterator.on("readable", readIterator);
           });
+      })
+      .catch(error => {
+        this.logger.error("Unable to start Solid sync watcher.", error);
+        this.syncEvents$.next(
+          ErrorSyncEvent.UNHANDLED_ERROR_SYNC.create(
+            ConnectorType.SOLID,
+            error?.message || "Unable to start Solid sync watcher."
+          )
+        );
       });
 
     return this.syncEvents$;
+  }
+
+  private syncAggregatedActivities(): void {
+    const activitiesContainers = this.getSelectedBases().map(base => `${base}/activities/`);
+    if (activitiesContainers.length === 0) {
+      this.logger.info("Solid aggregated sync skipped because no athlete WebID is selected.");
+      return;
+    }
+
+    this.engine
+      .queryBindings(
+        `
+PREFIX ldp: <http://www.w3.org/ns/ldp#>
+SELECT ?activitiesContainer ?activityIri WHERE {
+  VALUES ?activitiesContainer { ${activitiesContainers
+    .map(activitiesContainer => `<${activitiesContainer}>`)
+    .join(" ")} }
+  ?activitiesContainer ldp:contains ?activityIri .
+}
+`,
+        {
+          sources: activitiesContainers as [string, ...string[]],
+          lenient: true,
+          fetch: (input: RequestInfo | URL, init?: RequestInit) =>
+            activityRdfFetchCache.fetch(this.fetchWithAuth.bind(this), input, init)
+        }
+      )
+      .then(bindingsStream => {
+        const activitySources = new Set<string>();
+        let activityContainerVersion = 0;
+        const writableActivityContainer = activitiesContainers[0];
+        this.activeIterator = bindingsStream as unknown as AsyncIterator<any>;
+        this.logger.info(
+          `Solid aggregated sync started. Watching activity containers: ${activitiesContainers.join(", ")}`
+        );
+
+        const readBindingsStream = () => {
+          const added: string[] = [];
+          const removed: string[] = [];
+          const changed: string[] = [];
+          let bindings = bindingsStream.read();
+          while (bindings) {
+            const activityIri = bindings.get("activityIri");
+            const activitiesContainer = bindings.get("activitiesContainer")?.value || activitiesContainers[0];
+            if (activityIri) {
+              const activitySource = activityIri.value;
+              if (isAddition(bindings)) {
+                if (!activitySources.has(activitySource)) {
+                  activitySources.add(activitySource);
+                  added.push(activitySource);
+                  this.logger.info(
+                    `Aggregated activity source added: ${activitySource} (known activities: ${activitySources.size})`
+                  );
+                  if (activitiesContainer === writableActivityContainer) {
+                    this.syncAggregatedActivitySource(activitiesContainer, activitySource);
+                  }
+                } else {
+                  changed.push(activitySource);
+                  this.logger.info(`Aggregated activity source changed: ${activitySource}`);
+                  if (activitiesContainer === writableActivityContainer) {
+                    this.syncAggregatedActivitySource(activitiesContainer, activitySource);
+                  }
+                }
+              } else {
+                if (activitySources.delete(activitySource)) {
+                  removed.push(activitySource);
+                  this.logger.info(
+                    `Aggregated activity source removed: ${activitySource} (known activities: ${activitySources.size})`
+                  );
+                }
+              }
+            }
+            bindings = bindingsStream.read();
+          }
+          if (added.length || removed.length || changed.length) {
+            activityContainerVersion++;
+            this.syncEvents$.next(
+              new ActivityContainerSyncEvent(
+                ConnectorType.SOLID,
+                "Solid activity container updated",
+                activitiesContainers[0],
+                Array.from(activitySources),
+                added,
+                removed,
+                changed,
+                activityContainerVersion
+              )
+            );
+          }
+        };
+
+        readBindingsStream();
+        bindingsStream.on("readable", readBindingsStream);
+        bindingsStream.on("end", () => {
+          this.logger.info("Solid aggregated activity stream ended.");
+        });
+        bindingsStream.on("error", error => {
+          this.logger.error("Solid aggregated activity stream failed.", error);
+          this.syncEvents$.next(
+            ErrorSyncEvent.UNHANDLED_ERROR_SYNC.create(
+              ConnectorType.SOLID,
+              error?.message || "Solid aggregated activity stream failed."
+            )
+          );
+        });
+      })
+      .catch(error => {
+        this.logger.error("Unable to start Solid aggregated sync watcher.", error);
+        this.syncEvents$.next(
+          ErrorSyncEvent.UNHANDLED_ERROR_SYNC.create(
+            ConnectorType.SOLID,
+            error?.message || "Unable to start Solid aggregated sync watcher."
+          )
+        );
+      });
+  }
+
+  private syncAggregatedActivitySource(activitiesContainer: string, activitySource: string): void {
+    const mapper = new ActivityRDFMapper((input: RequestInfo | URL, init?: RequestInit) =>
+      activityRdfFetchCache.fetch(this.fetchWithAuth.bind(this), input, init)
+    );
+
+    mapper
+      .query([activitiesContainer, activitySource], {
+        sort: {
+          key: "activity_startTime",
+          ascending: true
+        }
+      })
+      .then(queryResult => {
+        const activities = queryResult as Activity[];
+        this.logger.info(
+          `Solid aggregated activity source mapped: ${activitySource} (${activities.length} activities).`
+        );
+        activities.forEach(activity => {
+          this.syncEvents$.next(new ActivitySyncEvent(ConnectorType.SOLID, null, activity, false));
+        });
+      })
+      .catch(error => {
+        this.logger.error(`Unable to map Solid aggregated activity source ${activitySource}.`, error);
+        this.syncEvents$.next(
+          ErrorSyncEvent.UNHANDLED_ERROR_SYNC.create(
+            ConnectorType.SOLID,
+            error instanceof Error ? error.message : String(error)
+          )
+        );
+      });
+  }
+
+  private getSelectedBases(): string[] {
+    return (this.solidConnectorConfig.info.selectedAthleteWebIds || [])
+      .map(webId => webId.replace("/profile/card#me", ""))
+      .filter(Boolean);
+  }
+
+  private initializeAuthFetch(): void {
+    const baseFetch = fetch as unknown as typeof globalThis.fetch;
+    const authSession = this.solidConnectorConfig?.info?.authSession;
+    if (!authSession || (!authSession.accessToken && !authSession.idToken && !authSession.refreshToken)) {
+      this.authFetch = baseFetch;
+      this.logger.warn("Solid connector auth session is missing. Solid sync requests may fail with 401.");
+      return;
+    }
+
+    const storage = this.createAuthStorage(authSession);
+    const auth = new Auth({
+      fetch: baseFetch,
+      storage,
+      persistTokens: true
+    });
+
+    auth.oidcAccessToken = authSession.accessToken || undefined;
+    auth.oidcToken = authSession.idToken || undefined;
+    auth.oidcRefreshToken = authSession.refreshToken || undefined;
+    auth.oidcTokenExpiry = authSession.expiresAt || undefined;
+    auth.webId = authSession.webId || this.solidConnectorConfig.info.webId || undefined;
+    this.authFetch = auth.createAuthFetch();
+
+    this.logger.info(`Solid connector authenticated fetch initialized for ${auth.webId || "unknown WebID"}.`);
+  }
+
+  private createAuthStorage(authSession: SolidAuthSession): Storage {
+    const values = new Map<string, string>();
+    if (authSession.issuer) {
+      values.set("oidc_issuer", authSession.issuer);
+    }
+    if (authSession.clientId) {
+      values.set("oidc_client_id", authSession.clientId);
+    }
+    if (authSession.redirectUri) {
+      values.set("oidc_redirect_uri", authSession.redirectUri);
+    }
+
+    values.set(
+      "oidc_tokens",
+      JSON.stringify({
+        access_token: authSession.accessToken || undefined,
+        id_token: authSession.idToken || undefined,
+        refresh_token: authSession.refreshToken || undefined,
+        expires_at: authSession.expiresAt || undefined,
+        web_id: authSession.webId || undefined
+      })
+    );
+
+    return {
+      get length(): number {
+        return values.size;
+      },
+      clear(): void {
+        values.clear();
+      },
+      getItem(key: string): string | null {
+        return values.has(key) ? values.get(key) : null;
+      },
+      key(index: number): string | null {
+        return Array.from(values.keys())[index] || null;
+      },
+      removeItem(key: string): void {
+        values.delete(key);
+      },
+      setItem(key: string, value: string): void {
+        values.set(key, value);
+      }
+    };
+  }
+
+  private async fetchWithAuth(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+    const method = (init.method || "GET").toUpperCase();
+    if (method !== "GET" && method !== "HEAD") {
+      activityRdfFetchCache.clear();
+    }
+    const target = this.resolveRequestTarget(input);
+    const cacheKey = this.umaTokenCacheKey(input, init);
+    try {
+      const cachedToken = this.getCachedUmaToken(cacheKey);
+      if (cachedToken) {
+        const cachedHeaders = new Headers(init.headers || {});
+        cachedHeaders.set("authorization", `${cachedToken.tokenType} ${cachedToken.accessToken}`);
+        const cachedResponse = await fetch(input as any, { ...init, headers: cachedHeaders } as any);
+        if (this.shouldLogSolidRequest(target)) {
+          this.logger.info(
+            `[SolidConnector/Main] ${method} ${target} -> ${cachedResponse.status} ${cachedResponse.statusText} (cached UMA RPT)`
+          );
+        }
+        if (cachedResponse.status !== 401) {
+          return cachedResponse as Response;
+        }
+        this.umaTokenCache.delete(cacheKey);
+        this.logger.warn(`[SolidConnector/Main] Evicted cached UMA RPT for ${method} ${target} after 401.`);
+      }
+
+      const response = await this.authFetch(input, init);
+      if (this.shouldLogSolidRequest(target)) {
+        const outcome = response.ok ? "success" : "failure";
+        const logFn = response.ok ? this.logger.info.bind(this.logger) : this.logger.warn.bind(this.logger);
+        logFn(`[SolidConnector/Main] ${method} ${target} -> ${response.status} ${response.statusText} (${outcome})`);
+      }
+      if (response.status === 401) {
+        const rptResponse = await this.retryWithUmaToken(input, init, response, cacheKey);
+        if (rptResponse) {
+          return rptResponse;
+        }
+        await this.requestAccessOnUnauthorized(target, method, response);
+      }
+      return response;
+    } catch (error) {
+      if (this.shouldLogSolidRequest(target)) {
+        this.logger.error(`[SolidConnector/Main] ${method} ${target} -> request error`, error);
+      }
+      if (this.isUmaAuthorizationError(error)) {
+        await this.requestAccessOnUnauthorized(target, method);
+      }
+      throw error;
+    }
+  }
+
+  private resolveRequestTarget(input: RequestInfo | URL): string {
+    if (typeof input === "string") {
+      return input;
+    }
+    if (input instanceof URL) {
+      return input.toString();
+    }
+    return input.url;
+  }
+
+  private shouldLogSolidRequest(target: string): boolean {
+    return target.includes("/activities/") || target.includes("/raw-activities/");
+  }
+
+  private async requestAccessOnUnauthorized(target: string, method: string, response?: Response): Promise<void> {
+    const requestKey = `${method} ${target}`;
+    if (this.requestedAccessKeys.has(requestKey)) {
+      return;
+    }
+
+    this.requestedAccessKeys.add(requestKey);
+    const requestingParty =
+      this.solidConnectorConfig?.info?.authSession?.webId || this.solidConnectorConfig?.info?.webId || null;
+
+    try {
+      const result = await UmaAccessRequest.request({
+        fetch: fetch as unknown as typeof globalThis.fetch,
+        requestingParty,
+        requestedTarget: target,
+        requestedAction: UmaAccessRequest.actionForMethod(method),
+        response
+      });
+
+      if (result.requested) {
+        this.logger.info(
+          `[SolidConnector/Main] UMA access request submitted for ${target} at ${result.accessRequestUrl}`
+        );
+      } else {
+        this.logger.warn(`[SolidConnector/Main] UMA access request was not submitted for ${target}: ${result.reason}`);
+      }
+    } catch (requestError) {
+      this.logger.warn(`[SolidConnector/Main] Unable to submit UMA access request for ${target}.`, requestError);
+    }
+  }
+
+  private isUmaAuthorizationError(error: unknown): boolean {
+    const authorizationError = error as { name?: string; status?: number };
+    return (
+      authorizationError?.name === "TokenRequestError" ||
+      authorizationError?.status === 400 ||
+      authorizationError?.status === 401 ||
+      authorizationError?.status === 403
+    );
+  }
+
+  private async retryWithUmaToken(
+    input: RequestInfo | URL,
+    init: RequestInit,
+    response: Response,
+    cacheKey: string
+  ): Promise<Response | null> {
+    const target = this.resolveRequestTarget(input);
+    const method = (init.method || "GET").toUpperCase();
+    const idToken = this.solidConnectorConfig?.info?.authSession?.idToken;
+    const challenge = this.parseUmaChallenge(response.headers.get("www-authenticate"));
+    if (!challenge?.asUri || !challenge.ticket || !idToken) {
+      this.logger.warn(
+        `[SolidConnector/Main] ${method} ${target} -> UMA retry unavailable ` +
+          `(hasAsUri=${Boolean(challenge?.asUri)}, hasTicket=${Boolean(challenge?.ticket)}, hasIdToken=${Boolean(
+            idToken
+          )}).`
+      );
+      return null;
+    }
+
+    const rpt = await this.requestUmaToken(challenge, idToken, method, target);
+    if (!rpt.access_token || !rpt.token_type) {
+      this.logger.warn(
+        `[SolidConnector/Main] UMA token response for ${method} ${target} did not include a usable RPT.`
+      );
+      return null;
+    }
+
+    this.setCachedUmaToken(cacheKey, rpt, method, target);
+    const rptHeaders = new Headers(init.headers || {});
+    rptHeaders.set("authorization", `${rpt.token_type} ${rpt.access_token}`);
+    const rptResponse = await fetch(input as any, { ...init, headers: rptHeaders } as any);
+    if (this.shouldLogSolidRequest(target)) {
+      this.logger.info(
+        `[SolidConnector/Main] ${method} ${target} -> ${rptResponse.status} ${rptResponse.statusText} (UMA RPT)`
+      );
+    }
+    if (rptResponse.status === 401) {
+      this.umaTokenCache.delete(cacheKey);
+    }
+    return rptResponse as Response;
+  }
+
+  private async requestUmaToken(
+    challenge: UmaChallenge,
+    idToken: string,
+    method: string,
+    target: string
+  ): Promise<UmaTokenResponse> {
+    const metadata = await this.discoverUmaMetadata(challenge.asUri);
+    if (!metadata.token_endpoint) {
+      throw new Error(`UMA metadata at ${challenge.asUri} does not include token_endpoint.`);
+    }
+
+    this.logger.info(
+      `[SolidConnector/Main] Requesting UMA RPT for ${method} ${target} at ${metadata.token_endpoint} ` +
+        `(claim_token_format=${SolidConnector.ID_TOKEN_CLAIM_FORMAT}).`
+    );
+    const tokenResponse = await fetch(metadata.token_endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({
+        grant_type: "urn:ietf:params:oauth:grant-type:uma-ticket",
+        ticket: challenge.ticket,
+        claim_token: idToken,
+        claim_token_format: SolidConnector.ID_TOKEN_CLAIM_FORMAT
+      })
+    });
+    const body = await this.safeJson(tokenResponse);
+    if (!tokenResponse.ok) {
+      throw new Error(`UMA token request failed (${tokenResponse.status}): ${JSON.stringify(body)}`);
+    }
+    return body as UmaTokenResponse;
+  }
+
+  private async discoverUmaMetadata(asUri: string): Promise<UmaMetadata> {
+    const metadataUrl = asUri.includes("/.well-known/")
+      ? asUri
+      : `${asUri.replace(/\/+$/u, "")}/.well-known/uma2-configuration`;
+    const cached = this.umaMetadataCache.get(metadataUrl);
+    if (cached) {
+      return cached;
+    }
+
+    const metadataPromise = fetch(metadataUrl, { headers: { accept: "application/json" } }).then(async response => {
+      if (!response.ok) {
+        throw new Error(`UMA metadata discovery failed at ${metadataUrl}: ${response.status}`);
+      }
+      return (await response.json()) as UmaMetadata;
+    });
+    this.umaMetadataCache.set(metadataUrl, metadataPromise);
+    try {
+      return await metadataPromise;
+    } catch (error) {
+      this.umaMetadataCache.delete(metadataUrl);
+      throw error;
+    }
+  }
+
+  private parseUmaChallenge(header: string | null): UmaChallenge | null {
+    if (!header || !header.toLowerCase().includes("uma")) {
+      return null;
+    }
+
+    const params: Record<string, string> = {};
+    const regex = /(\w+)=("[^"]*"|[^\s,]+)/gu;
+    let match = regex.exec(header);
+    while (match) {
+      params[match[1]] = match[2].startsWith('"') ? match[2].slice(1, -1) : match[2];
+      match = regex.exec(header);
+    }
+
+    return {
+      asUri: params.as_uri || null,
+      ticket: params.ticket || null
+    };
+  }
+
+  private getCachedUmaToken(cacheKey: string): CachedUmaToken | null {
+    const token = this.umaTokenCache.get(cacheKey);
+    if (!token) {
+      return null;
+    }
+    if (token.expiresAt && token.expiresAt <= Date.now()) {
+      this.umaTokenCache.delete(cacheKey);
+      return null;
+    }
+    return token;
+  }
+
+  private setCachedUmaToken(cacheKey: string, rpt: UmaTokenResponse, method: string, target: string): void {
+    if (!rpt.access_token || !rpt.token_type) {
+      return;
+    }
+    const expiresAt = rpt.expires_in
+      ? Date.now() + rpt.expires_in * 1000 - SolidConnector.UMA_TOKEN_EXPIRY_SKEW_MS
+      : null;
+    this.umaTokenCache.set(cacheKey, {
+      accessToken: rpt.access_token,
+      tokenType: rpt.token_type,
+      expiresAt
+    });
+    this.logger.info(
+      `[SolidConnector/Main] Cached UMA RPT for ${method} ${target}` +
+        `${expiresAt ? ` until ${new Date(expiresAt).toISOString()}` : ""}.`
+    );
+  }
+
+  private umaTokenCacheKey(input: RequestInfo | URL, init: RequestInit): string {
+    return `${(init.method || "GET").toUpperCase()} ${this.requestUrl(input)}`;
+  }
+
+  private requestUrl(input: RequestInfo | URL): string {
+    const value = this.resolveRequestTarget(input);
+    try {
+      const url = new URL(value);
+      url.hash = "";
+      return url.toString();
+    } catch (_error) {
+      return value;
+    }
+  }
+
+  private async safeJson(response: Response): Promise<unknown> {
+    try {
+      return await response.json();
+    } catch (_error) {
+      return null;
+    }
   }
 
   public computeSportsLibEvent(activityFile: ActivitySolid): Promise<{

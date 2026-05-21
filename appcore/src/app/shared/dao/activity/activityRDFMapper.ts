@@ -1,19 +1,194 @@
 import { Activity, ActivityFlag, Lap, Peak, Scores, SlopeProfile } from "@elevate/shared/models/sync/activity.model";
-import { QueryEngine } from "@comunica/query-sparql";
-import { AsyncIterator } from "asynciterator";
-import { Bindings, Term } from "@rdfjs/types";
+import { Quad, Term } from "@rdfjs/types";
 import { ZoneModel } from "@elevate/shared/models/zone.model";
-import { ElevateSport } from "@elevate/shared/enums/elevate-sport.enum";
 import { ConnectorType } from "@elevate/shared/sync/connectors/connector-type.enum";
 import { v4 as uuidv4 } from "uuid";
 import { ActivitySparqlFieldMap } from "./activitySparqlFieldMap";
+import { MEDTOP_NS, OAACTIVITY_NS, activityTypeIriForElevateSport } from "./activity-type-ontology-map";
 //import { fetch as cfetch } from "cross-fetch";
 
-export class ActivityRDFMapper {
-  private queryEngine: QueryEngine;
+export interface OxigraphStore {
+  add(quad: unknown): void;
+  delete(quad: unknown): void;
+  load(
+    input: string,
+    options: {
+      base_iri?: string;
+      format: string;
+      lenient?: boolean;
+    }
+  ): void;
+  query(
+    query: string,
+    options?: {
+      use_default_graph_as_union?: boolean;
+    }
+  ): boolean | Map<string, Term>[] | Quad[] | string;
+}
 
-  constructor() {
-    this.queryEngine = new QueryEngine();
+interface OxigraphModule {
+  Store: new () => OxigraphStore;
+  fromQuad(quad: Quad): unknown;
+  default?: () => Promise<void>;
+}
+
+function ensureWebCryptoForOxigraph(): void {
+  const globalScope = globalThis as typeof globalThis & { crypto?: Crypto };
+  if (globalScope.crypto?.getRandomValues) {
+    return;
+  }
+
+  try {
+    const nodeCrypto = eval("require")("crypto");
+    if (nodeCrypto?.webcrypto?.getRandomValues) {
+      Object.defineProperty(globalScope, "crypto", {
+        value: nodeCrypto.webcrypto,
+        configurable: true,
+        writable: false
+      });
+    }
+  } catch (_error) {
+    // Browser builds already provide Web Crypto. Electron main gets Node's webcrypto when available.
+  }
+}
+
+ensureWebCryptoForOxigraph();
+const oxigraph = require("oxigraph") as OxigraphModule;
+
+type ActivityBindings = Map<string, Term>;
+export type ActivityQuerySource =
+  | string
+  | Iterable<Quad>
+  | {
+      getQuads: (subject?: Term | null, predicate?: Term | null, object?: Term | null, graph?: Term | null) => Quad[];
+    };
+type QuadStoreSource = Extract<ActivityQuerySource, { getQuads: (...args: any[]) => Quad[] }>;
+export type ActivityQueryOptions = {
+  keys?: string[];
+  boundKeys?: { key: string; value: string | number | Date | boolean }[];
+  filterKeys?: (
+    | { key: string; relationKeyToValue: string; value: string | number | Date | boolean }
+    | {
+        requiredKeys: string[];
+        condition: string;
+      }
+  )[];
+  sort?: { key: string; ascending: boolean };
+  slice?: { limit: number; offset?: number };
+  type?: "select" | "count" | "ask";
+};
+
+export class ActivityRDFMapper {
+  private static readonly ACTIVITY_ONTOLOGY_IRI = "https://solidlabresearch.github.io/activity-ontology/";
+  private static oxigraphReady: Promise<void> | null = null;
+  private readonly authFetch?: typeof globalThis.fetch;
+
+  constructor(authFetch?: typeof globalThis.fetch) {
+    this.authFetch = authFetch;
+  }
+
+  private static async ensureOxigraphReady(): Promise<void> {
+    const init = (oxigraph as any).default;
+    if (typeof init !== "function") {
+      return;
+    }
+    if (!ActivityRDFMapper.oxigraphReady) {
+      ActivityRDFMapper.oxigraphReady = init();
+    }
+    await ActivityRDFMapper.oxigraphReady;
+  }
+
+  public static async createEmptyStore(): Promise<OxigraphStore> {
+    await ActivityRDFMapper.ensureOxigraphReady();
+    return new oxigraph.Store();
+  }
+
+  public static addQuadToStore(store: OxigraphStore, quad: Quad): void {
+    store.add(oxigraph.fromQuad(quad));
+  }
+
+  public static deleteQuadFromStore(store: OxigraphStore, quad: Quad): void {
+    store.delete(oxigraph.fromQuad(quad));
+  }
+
+  private async createStore(sources: ActivityQuerySource[]): Promise<OxigraphStore> {
+    const store = await ActivityRDFMapper.createEmptyStore();
+
+    for (const source of sources) {
+      if (typeof source === "string") {
+        if (source === ActivityRDFMapper.ACTIVITY_ONTOLOGY_IRI) {
+          continue;
+        }
+        await this.loadRemoteSource(store, source);
+      } else if (this.isQuadStoreSource(source)) {
+        source.getQuads(null, null, null, null).forEach(quad => store.add(oxigraph.fromQuad(quad)));
+      } else {
+        for (const quad of source) {
+          store.add(oxigraph.fromQuad(quad));
+        }
+      }
+    }
+
+    return store;
+  }
+
+  private isQuadStoreSource(source: Exclude<ActivityQuerySource, string>): source is QuadStoreSource {
+    return typeof (source as QuadStoreSource).getQuads === "function";
+  }
+
+  private async loadRemoteSource(store: OxigraphStore, source: string): Promise<void> {
+    const fetchFn = this.authFetch ?? globalThis.fetch.bind(globalThis);
+    const response = await fetchFn(source);
+    if (!response.ok) {
+      if (response.status === 404 && this.isOptionalActivityContainerSource(source)) {
+        console.info(`[ActivityRDFMapper] RDF source ${source} does not exist yet. Treating it as empty.`);
+        return;
+      }
+      throw new Error(`Failed to load RDF source ${source}: ${response.status} ${response.statusText}`);
+    }
+
+    store.load(await response.text(), {
+      base_iri: source,
+      format: this.getRdfFormat(response.headers.get("content-type"), source),
+      lenient: true
+    });
+  }
+
+  private isOptionalActivityContainerSource(source: string): boolean {
+    try {
+      const pathParts = new URL(source).pathname.split("/").filter(Boolean);
+      const containerName = pathParts[pathParts.length - 1];
+      return containerName === "activities" || containerName === "raw-activities";
+    } catch (_error) {
+      return source.endsWith("/activities/") || source.endsWith("/raw-activities/");
+    }
+  }
+
+  private getRdfFormat(contentType: string | null, source: string): string {
+    const type = contentType?.split(";")[0].trim().toLowerCase();
+    if (type) {
+      if (type.includes("turtle")) return "text/turtle";
+      if (type.includes("n-triples")) return "application/n-triples";
+      if (type.includes("n-quads")) return "application/n-quads";
+      if (type.includes("trig")) return "application/trig";
+      if (type.includes("rdf+xml")) return "application/rdf+xml";
+      if (type.includes("n3")) return "text/n3";
+    }
+
+    if (source.endsWith(".nt")) return "application/n-triples";
+    if (source.endsWith(".nq")) return "application/n-quads";
+    if (source.endsWith(".trig")) return "application/trig";
+    if (source.endsWith(".rdf") || source.endsWith(".xml")) return "application/rdf+xml";
+    if (source.endsWith(".n3")) return "text/n3";
+    return "text/turtle";
+  }
+
+  private queryBindings(store: OxigraphStore, query: string): ActivityBindings[] {
+    const results = store.query(query, { use_default_graph_as_union: true });
+    if (!Array.isArray(results)) {
+      return [];
+    }
+    return (results as unknown[]).filter((result): result is ActivityBindings => result instanceof Map);
   }
 
   // Type guard functions for better type safety
@@ -67,20 +242,24 @@ export class ActivityRDFMapper {
   }
 
   public async query(
-    sources: [string, ...string[]],
-    options?: {
-      keys?: string[];
-      boundKeys?: { key: string; value: string | number | Date | boolean }[];
-      filterKeys?: (
-        | { key: string; relationKeyToValue: string; value: string | number | Date | boolean }
-        | {
-            requiredKeys: string[];
-            condition: string;
-          }
-      )[];
-      sort?: { key: string; ascending: boolean };
-      slice?: { limit: number; offset?: number };
-      type?: "select" | "count" | "ask";
+    sources: [ActivityQuerySource, ...ActivityQuerySource[]],
+    options?: ActivityQueryOptions
+  ): Promise<Activity[] | number | boolean> {
+    const store = await this.createStore([...sources, ActivityRDFMapper.ACTIVITY_ONTOLOGY_IRI]);
+    return this.queryLoadedStore(store, options, {
+      sourceCount: sources.length,
+      activityLocationCount: Math.max(sources.length - 1, 0),
+      sources: sources.slice(0, 6).map(source => (typeof source === "string" ? source : "[rdf-store]"))
+    });
+  }
+
+  public async queryLoadedStore(
+    store: OxigraphStore,
+    options?: ActivityQueryOptions,
+    metadata: { sourceCount: number; activityLocationCount: number; sources: string[] } = {
+      sourceCount: 1,
+      activityLocationCount: 0,
+      sources: ["[materialized-store]"]
     }
   ): Promise<Activity[] | number | boolean> {
     if (!options) {
@@ -92,12 +271,13 @@ PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 PREFIX prov: <http://www.w3.org/ns/prov#>
 PREFIX activo: <https://solidlabresearch.github.io/activity-ontology#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
 `;
 
     if (options.type === "count") {
       query += "SELECT (COUNT(?activity) AS ?count) WHERE {\n";
     } else if (options.type === "ask") {
-      query += "ASK {\n";
+      query += "SELECT ?activity WHERE {\n";
     } else {
       query += "SELECT * WHERE {\n";
     }
@@ -171,13 +351,6 @@ PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
       }
     }
 
-    // Add bound keys to the query tree
-    for (const boundKey of options.boundKeys ?? []) {
-      const key = boundKey.key;
-      const value = boundKey.value;
-      query += `BIND(${this.encodeTerm(value)} AS ?${key})\n`;
-    }
-
     // Construct query from tree
     const constructQuery = (node: any): string => {
       let queryPart = node.graphPattern;
@@ -197,6 +370,11 @@ PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
       return queryPart;
     };
     query += constructQuery(queryTree);
+
+    // Add bound keys after graph construction so computed bindings can be filtered as well.
+    for (const boundKey of options.boundKeys ?? []) {
+      query += `FILTER(?${boundKey.key} = ${this.encodeTerm(boundKey.value)})\n`;
+    }
 
     // Add filter keys to the query
     for (const filterKey of options.filterKeys ?? []) {
@@ -218,7 +396,9 @@ PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
         query += "ORDER BY DESC(?" + options.sort.key + ")\n";
       }
     }
-    if (options.slice) {
+    if (options.type === "ask") {
+      query += "LIMIT 1\n";
+    } else if (options.slice) {
       if (options.slice.limit) {
         query += "LIMIT " + options.slice.limit + "\n";
       }
@@ -227,271 +407,262 @@ PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
       }
     }
 
-    if (options.type === "ask") {
-      return this.queryEngine.queryBoolean(query, {
-        sources: [...sources, "https://solidlabresearch.github.io/activity-ontology/"],
-        lenient: true
-      });
-    }
-
-    // do query
-    const bindingsStream: AsyncIterator<Bindings> = await this.queryEngine.queryBindings(query, {
-      sources: [...sources, "https://solidlabresearch.github.io/activity-ontology/"],
-      lenient: true
+    console.info("[ActivityRDFMapper] query started", {
+      type: options.type ?? "select",
+      keyCount: options.keys.length,
+      keys: options.keys.slice(0, 20),
+      sourceCount: metadata.sourceCount,
+      activityLocationCount: metadata.activityLocationCount,
+      sources: metadata.sources
     });
 
+    const bindingsResults = this.queryBindings(store, query);
+
+    if (options.type === "ask") {
+      return bindingsResults.length > 0;
+    }
+
     if (options.type === "count") {
-      return new Promise<number>((resolve, reject) => {
-        let count = 0;
-        bindingsStream.on("data", (bindings: Bindings) => {
-          count = parseInt(bindings.get("count").value);
-        });
-        bindingsStream.on("end", () => {
-          resolve(count);
-        });
-        bindingsStream.on("error", (error: Error) => {
-          reject(error);
-        });
-      });
+      const count = parseInt(bindingsResults[0]?.get("count")?.value ?? "0");
+      console.info("[ActivityRDFMapper] count query completed", { count });
+      return count;
     }
 
     let result: Activity[] = [];
     try {
-      result = await bindingsStream
-        .transform({
-          transform: async (bindings: Bindings, done: () => void, push: (activity: Activity) => void) => {
-            const activity = new Activity();
-            const activityIriParts = bindings.get("activity").value.split("/");
-            activity.id = activityIriParts[activityIriParts.length - 1].split("#")[0];
-            activity.connector = ConnectorType.SOLID;
+      result = await Promise.all(
+        bindingsResults.map(async bindings => {
+          const activity = new Activity();
+          const activityIriParts = bindings.get("activity").value.split("/");
+          activity.id = activityIriParts[activityIriParts.length - 1].split("#")[0];
+          activity.connector = ConnectorType.SOLID;
 
-            for (const key of options.keys) {
-              if (ActivitySparqlFieldMap[key].ignore) {
-                continue;
-              }
-              const activityAttributes = key.split("_").slice(1);
-              let workingObject = activity;
-              for (let i = 0; i < activityAttributes.length; i++) {
-                const attribute = activityAttributes[i];
-                if (i === activityAttributes.length - 1) {
-                  // last attribute, set value
-                  let value = null;
-                  if (ActivitySparqlFieldMap[key].formatValue) {
-                    value = ActivitySparqlFieldMap[key].formatValue(bindings);
-                  } else if (bindings.has(key)) {
-                    value = this.parseTerm(bindings.get(key));
-                  }
-                  workingObject[attribute] = value;
-                } else {
-                  // not the last attribute, ensure the object exists
-                  if (!workingObject[attribute]) {
-                    workingObject[attribute] = {};
-                  }
-                  workingObject = workingObject[attribute];
+          for (const key of options.keys) {
+            if (ActivitySparqlFieldMap[key].ignore) {
+              continue;
+            }
+            const activityAttributes = key.split("_").slice(1);
+            let workingObject = activity;
+            for (let i = 0; i < activityAttributes.length; i++) {
+              const attribute = activityAttributes[i];
+              if (i === activityAttributes.length - 1) {
+                // last attribute, set value
+                let value = null;
+                if (ActivitySparqlFieldMap[key].formatValue) {
+                  value = ActivitySparqlFieldMap[key].formatValue(bindings as any);
+                } else if (bindings.has(key)) {
+                  value = this.parseTerm(bindings.get(key));
                 }
+                workingObject[attribute] = value;
+              } else {
+                // not the last attribute, ensure the object exists
+                if (!workingObject[attribute]) {
+                  workingObject[attribute] = {};
+                }
+                workingObject = workingObject[attribute];
               }
             }
-
-            const promises = [];
-            if (completeActivity || needsFlags) {
-              promises.push(
-                this.queryFlags(bindings.get("activity").value, sources).then(result => {
-                  activity.flags = result;
-                })
-              );
-            }
-
-            if (completeActivity) {
-              // We also need to query Peak, Zones, Lap, and Flag data
-              promises.push(
-                this.queryLaps(bindings.get("activity").value, sources).then(result => {
-                  activity.laps = result;
-                })
-              );
-
-              // Stats
-              if (bindings.get("activity_stats_speed")) {
-                promises.push(
-                  this.queryPeaks(bindings.get("activity_stats_speed").value, sources).then(result => {
-                    if (result) {
-                      activity.stats.speed.peaks = result;
-                    }
-                  })
-                );
-                promises.push(
-                  this.complicatedQueryZones(bindings.get("activity_stats_speed").value, sources).then(result => {
-                    if (result) {
-                      activity.stats.speed.zones = result;
-                    }
-                  })
-                );
-              }
-
-              if (bindings.get("activity_stats_pace")) {
-                promises.push(
-                  this.complicatedQueryZones(bindings.get("activity_stats_pace").value, sources).then(result => {
-                    activity.stats.pace.zones = result;
-                  })
-                );
-              }
-
-              if (bindings.get("activity_stats_power")) {
-                promises.push(
-                  this.queryPeaks(bindings.get("activity_stats_power").value, sources).then(result => {
-                    activity.stats.power.peaks = result;
-                  })
-                );
-                promises.push(
-                  this.complicatedQueryZones(bindings.get("activity_stats_power").value, sources).then(result => {
-                    activity.stats.power.zones = result;
-                  })
-                );
-              }
-
-              if (bindings.get("activity_stats_heartRate")) {
-                promises.push(
-                  this.queryPeaks(bindings.get("activity_stats_heartRate").value, sources).then(result => {
-                    activity.stats.heartRate.peaks = result;
-                  })
-                );
-                promises.push(
-                  this.complicatedQueryZones(bindings.get("activity_stats_heartRate").value, sources).then(result => {
-                    activity.stats.heartRate.zones = result;
-                  })
-                );
-              }
-
-              if (bindings.get("activity_stats_cadence")) {
-                promises.push(
-                  this.queryPeaks(bindings.get("activity_stats_cadence").value, sources).then(result => {
-                    activity.stats.cadence.peaks = result;
-                  })
-                );
-                promises.push(
-                  this.complicatedQueryZones(bindings.get("activity_stats_cadence").value, sources).then(result => {
-                    activity.stats.cadence.zones = result;
-                  })
-                );
-              }
-
-              if (bindings.get("activity_stats_grade")) {
-                promises.push(
-                  this.complicatedQueryZones(bindings.get("activity_stats_grade").value, sources).then(result => {
-                    activity.stats.grade.zones = result;
-                  })
-                );
-              }
-
-              if (bindings.get("activity_stats_elevation")) {
-                promises.push(
-                  this.complicatedQueryZones(bindings.get("activity_stats_elevation").value, sources).then(result => {
-                    activity.stats.elevation.elevationZones = result;
-                  })
-                );
-              }
-
-              // srcStats
-              if (bindings.get("activity_srcStats_speed")) {
-                promises.push(
-                  this.queryPeaks(bindings.get("activity_srcStats_speed").value, sources).then(result => {
-                    if (result) {
-                      activity.srcStats.speed.peaks = result;
-                    }
-                  })
-                );
-                promises.push(
-                  this.complicatedQueryZones(bindings.get("activity_srcStats_speed").value, sources).then(result => {
-                    if (result) {
-                      activity.srcStats.speed.zones = result;
-                    }
-                  })
-                );
-              }
-
-              if (bindings.get("activity_srcStats_pace")) {
-                promises.push(
-                  this.complicatedQueryZones(bindings.get("activity_srcStats_pace").value, sources).then(result => {
-                    activity.srcStats.pace.zones = result;
-                  })
-                );
-              }
-
-              if (bindings.get("activity_srcStats_power")) {
-                promises.push(
-                  this.queryPeaks(bindings.get("activity_srcStats_power").value, sources).then(result => {
-                    activity.srcStats.power.peaks = result;
-                  })
-                );
-                promises.push(
-                  this.complicatedQueryZones(bindings.get("activity_srcStats_power").value, sources).then(result => {
-                    activity.srcStats.power.zones = result;
-                  })
-                );
-              }
-
-              if (bindings.get("activity_srcStats_heartRate")) {
-                promises.push(
-                  this.queryPeaks(bindings.get("activity_srcStats_heartRate").value, sources).then(result => {
-                    activity.srcStats.heartRate.peaks = result;
-                  })
-                );
-                promises.push(
-                  this.complicatedQueryZones(bindings.get("activity_srcStats_heartRate").value, sources).then(
-                    result => {
-                      activity.srcStats.heartRate.zones = result;
-                    }
-                  )
-                );
-              }
-
-              if (bindings.get("activity_srcStats_cadence")) {
-                promises.push(
-                  this.queryPeaks(bindings.get("activity_srcStats_cadence").value, sources).then(result => {
-                    activity.srcStats.cadence.peaks = result;
-                  })
-                );
-                promises.push(
-                  this.complicatedQueryZones(bindings.get("activity_srcStats_cadence").value, sources).then(result => {
-                    activity.srcStats.cadence.zones = result;
-                  })
-                );
-              }
-
-              if (bindings.get("activity_srcStats_grade")) {
-                promises.push(
-                  this.complicatedQueryZones(bindings.get("activity_srcStats_grade").value, sources).then(result => {
-                    activity.srcStats.grade.zones = result;
-                  })
-                );
-              }
-
-              if (bindings.get("activity_srcStats_elevation")) {
-                promises.push(
-                  this.complicatedQueryZones(bindings.get("activity_srcStats_elevation").value, sources).then(
-                    result => {
-                      activity.srcStats.elevation.elevationZones = result;
-                    }
-                  )
-                );
-              }
-            }
-
-            await Promise.all(promises);
-
-            push(activity);
-            done();
           }
+
+          const promises = [];
+          if (completeActivity || needsFlags) {
+            promises.push(
+              this.queryFlags(bindings.get("activity").value, store).then(result => {
+                activity.flags = result;
+              })
+            );
+          }
+
+          if (completeActivity) {
+            // We also need to query Peak, Zones, Lap, and Flag data
+            promises.push(
+              this.queryLaps(bindings.get("activity").value, store).then(result => {
+                activity.laps = result;
+              })
+            );
+
+            // Stats
+            if (bindings.get("activity_stats_speed")) {
+              promises.push(
+                this.queryPeaks(bindings.get("activity_stats_speed").value, store).then(result => {
+                  if (result) {
+                    activity.stats.speed.peaks = result;
+                  }
+                })
+              );
+              promises.push(
+                this.complicatedQueryZones(bindings.get("activity_stats_speed").value, store).then(result => {
+                  if (result) {
+                    activity.stats.speed.zones = result;
+                  }
+                })
+              );
+            }
+
+            if (bindings.get("activity_stats_pace")) {
+              promises.push(
+                this.complicatedQueryZones(bindings.get("activity_stats_pace").value, store).then(result => {
+                  activity.stats.pace.zones = result;
+                })
+              );
+            }
+
+            if (bindings.get("activity_stats_power")) {
+              promises.push(
+                this.queryPeaks(bindings.get("activity_stats_power").value, store).then(result => {
+                  activity.stats.power.peaks = result;
+                })
+              );
+              promises.push(
+                this.complicatedQueryZones(bindings.get("activity_stats_power").value, store).then(result => {
+                  activity.stats.power.zones = result;
+                })
+              );
+            }
+
+            if (bindings.get("activity_stats_heartRate")) {
+              promises.push(
+                this.queryPeaks(bindings.get("activity_stats_heartRate").value, store).then(result => {
+                  activity.stats.heartRate.peaks = result;
+                })
+              );
+              promises.push(
+                this.complicatedQueryZones(bindings.get("activity_stats_heartRate").value, store).then(result => {
+                  activity.stats.heartRate.zones = result;
+                })
+              );
+            }
+
+            if (bindings.get("activity_stats_cadence")) {
+              promises.push(
+                this.queryPeaks(bindings.get("activity_stats_cadence").value, store).then(result => {
+                  activity.stats.cadence.peaks = result;
+                })
+              );
+              promises.push(
+                this.complicatedQueryZones(bindings.get("activity_stats_cadence").value, store).then(result => {
+                  activity.stats.cadence.zones = result;
+                })
+              );
+            }
+
+            if (bindings.get("activity_stats_grade")) {
+              promises.push(
+                this.complicatedQueryZones(bindings.get("activity_stats_grade").value, store).then(result => {
+                  activity.stats.grade.zones = result;
+                })
+              );
+            }
+
+            if (bindings.get("activity_stats_elevation")) {
+              promises.push(
+                this.complicatedQueryZones(bindings.get("activity_stats_elevation").value, store).then(result => {
+                  activity.stats.elevation.elevationZones = result;
+                })
+              );
+            }
+
+            // srcStats
+            if (bindings.get("activity_srcStats_speed")) {
+              promises.push(
+                this.queryPeaks(bindings.get("activity_srcStats_speed").value, store).then(result => {
+                  if (result) {
+                    activity.srcStats.speed.peaks = result;
+                  }
+                })
+              );
+              promises.push(
+                this.complicatedQueryZones(bindings.get("activity_srcStats_speed").value, store).then(result => {
+                  if (result) {
+                    activity.srcStats.speed.zones = result;
+                  }
+                })
+              );
+            }
+
+            if (bindings.get("activity_srcStats_pace")) {
+              promises.push(
+                this.complicatedQueryZones(bindings.get("activity_srcStats_pace").value, store).then(result => {
+                  activity.srcStats.pace.zones = result;
+                })
+              );
+            }
+
+            if (bindings.get("activity_srcStats_power")) {
+              promises.push(
+                this.queryPeaks(bindings.get("activity_srcStats_power").value, store).then(result => {
+                  activity.srcStats.power.peaks = result;
+                })
+              );
+              promises.push(
+                this.complicatedQueryZones(bindings.get("activity_srcStats_power").value, store).then(result => {
+                  activity.srcStats.power.zones = result;
+                })
+              );
+            }
+
+            if (bindings.get("activity_srcStats_heartRate")) {
+              promises.push(
+                this.queryPeaks(bindings.get("activity_srcStats_heartRate").value, store).then(result => {
+                  activity.srcStats.heartRate.peaks = result;
+                })
+              );
+              promises.push(
+                this.complicatedQueryZones(bindings.get("activity_srcStats_heartRate").value, store).then(result => {
+                  activity.srcStats.heartRate.zones = result;
+                })
+              );
+            }
+
+            if (bindings.get("activity_srcStats_cadence")) {
+              promises.push(
+                this.queryPeaks(bindings.get("activity_srcStats_cadence").value, store).then(result => {
+                  activity.srcStats.cadence.peaks = result;
+                })
+              );
+              promises.push(
+                this.complicatedQueryZones(bindings.get("activity_srcStats_cadence").value, store).then(result => {
+                  activity.srcStats.cadence.zones = result;
+                })
+              );
+            }
+
+            if (bindings.get("activity_srcStats_grade")) {
+              promises.push(
+                this.complicatedQueryZones(bindings.get("activity_srcStats_grade").value, store).then(result => {
+                  activity.srcStats.grade.zones = result;
+                })
+              );
+            }
+
+            if (bindings.get("activity_srcStats_elevation")) {
+              promises.push(
+                this.complicatedQueryZones(bindings.get("activity_srcStats_elevation").value, store).then(result => {
+                  activity.srcStats.elevation.elevationZones = result;
+                })
+              );
+            }
+          }
+
+          await Promise.all(promises);
+
+          return activity;
         })
-        .toArray();
+      );
     } catch (error) {
       console.error("Error processing bindings stream:", error);
     }
 
-    return result.length > 0 ? result : null;
+    console.info("[ActivityRDFMapper] select query completed", {
+      count: result.length,
+      activityIds: result.slice(0, 10).map(activity => activity.id)
+    });
+    return result;
   }
 
-  private async queryLaps(activityId: string, sources: [string, ...string[]]): Promise<Lap[] | null> {
-    const bindingsStream = await this.queryEngine.queryBindings(
+  private async queryLaps(activityId: string, store: OxigraphStore): Promise<Lap[] | null> {
+    const bindingsResults = this.queryBindings(
+      store,
       `
 PREFIX activo: <https://solidlabresearch.github.io/activity-ontology#>
 SELECT
@@ -560,45 +731,35 @@ WHERE {
   }
 }
 ORDER BY ?lapIndex
-    `,
-      {
-        sources,
-        lenient: true
-      }
+    `
     );
 
-    let laps = await bindingsStream
-      .map((bindings: Bindings) => {
-        const lap: Lap = {
-          id: parseInt(bindings.get("lapIndex").value),
-          indexes: [parseInt(bindings.get("lapStart").value), parseInt(bindings.get("lapEnd").value)],
-          active: bindings.get("isActive").value === "true"
-        };
+    let laps = bindingsResults.map(bindings => {
+      const lap: Lap = {
+        id: parseInt(bindings.get("lapIndex").value),
+        indexes: [parseInt(bindings.get("lapStart").value), parseInt(bindings.get("lapEnd").value)],
+        active: bindings.get("isActive").value === "true"
+      };
 
-        for (const key of bindings.keys()) {
-          if (
-            key.value === "lapIndex" ||
-            key.value === "lapStart" ||
-            key.value === "lapEnd" ||
-            key.value === "isActive"
-          ) {
-            continue; // Skip these keys as they are already handled
-          }
-          let term = bindings.get(key);
-          if (term) {
-            lap[key.value] = this.parseTerm(term);
-          }
+      for (const key of bindings.keys()) {
+        if (key === "lapIndex" || key === "lapStart" || key === "lapEnd" || key === "isActive") {
+          continue; // Skip these keys as they are already handled
         }
+        let term = bindings.get(key);
+        if (term) {
+          lap[key] = this.parseTerm(term);
+        }
+      }
 
-        return lap;
-      })
-      .toArray();
+      return lap;
+    });
 
     return laps.length > 0 ? laps : null;
   }
 
-  private async queryFlags(activityId: string, sources: [string, ...string[]]): Promise<ActivityFlag[] | null> {
-    const bindingsStream = await this.queryEngine.queryBindings(
+  private async queryFlags(activityId: string, store: OxigraphStore): Promise<ActivityFlag[] | null> {
+    const bindingsResults = this.queryBindings(
+      store,
       `
 PREFIX activo: <https://solidlabresearch.github.io/activity-ontology#>
 SELECT ?index WHERE {
@@ -620,23 +781,18 @@ SELECT ?index WHERE {
     (activo:SCORE_SSS_PER_HOUR_ABNORMAL 11)
   }
 }
-    `,
-      {
-        sources: ["https://solidlabresearch.github.io/activity-ontology/", ...sources],
-        lenient: true
-      }
+    `
     );
-    const result = await bindingsStream
-      .map((bindings: Bindings) => {
-        return parseInt(bindings.get("index").value) as ActivityFlag;
-      })
-      .toArray();
+    const result = bindingsResults.map(bindings => {
+      return parseInt(bindings.get("index").value) as ActivityFlag;
+    });
 
     return result.length > 0 ? result : null;
   }
 
-  private async queryPeaks(statId: string, sources: [string, ...string[]]): Promise<Peak[] | null> {
-    const bindingsStream = await this.queryEngine.queryBindings(
+  private async queryPeaks(statId: string, store: OxigraphStore): Promise<Peak[] | null> {
+    const bindingsResults = this.queryBindings(
+      store,
       `
 PREFIX activo: <https://solidlabresearch.github.io/activity-ontology#>
 SELECT * WHERE {
@@ -646,27 +802,22 @@ SELECT * WHERE {
   ?peak activo:peakValue ?peakValue .
 }
 ORDER BY ?peakDuration
-    `,
-      {
-        sources,
-        lenient: true
-      }
+    `
     );
-    const result = await bindingsStream
-      .map((bindings: Bindings) => {
-        return {
-          start: parseInt(bindings.get("peakStart").value),
-          range: parseInt(bindings.get("peakDuration").value),
-          end: parseInt(bindings.get("peakStart").value) + parseInt(bindings.get("peakDuration").value),
-          result: parseFloat(bindings.get("peakValue").value)
-        };
-      })
-      .toArray();
+    const result = bindingsResults.map(bindings => {
+      return {
+        start: parseInt(bindings.get("peakStart").value),
+        range: parseInt(bindings.get("peakDuration").value),
+        end: parseInt(bindings.get("peakStart").value) + parseInt(bindings.get("peakDuration").value),
+        result: parseFloat(bindings.get("peakValue").value)
+      };
+    });
     return result.length > 0 ? result : null;
   }
 
-  private async simpleQueryZones(statId: string, sources: [string, ...string[]]): Promise<ZoneModel[] | null> {
-    const bindingsStream = await this.queryEngine.queryBindings(
+  private async simpleQueryZones(statId: string, store: OxigraphStore): Promise<ZoneModel[] | null> {
+    const bindingsResults = this.queryBindings(
+      store,
       `
 PREFIX activo: <https://solidlabresearch.github.io/activity-ontology#>
 SELECT * WHERE {
@@ -675,15 +826,11 @@ SELECT * WHERE {
   ?zone activo:zoneIndex ?zoneIndex .
   ?zone activo:time ?time .
 }
-    `,
-      {
-        sources,
-        lenient: true
-      }
+    `
     );
     let totalTime = 0;
     const zones = [];
-    bindingsStream.on("data", (bindings: Bindings) => {
+    bindingsResults.forEach(bindings => {
       const partialZone = {
         from: parseInt(bindings.get("zoneStart").value),
         s: parseFloat(bindings.get("time").value)
@@ -696,8 +843,6 @@ SELECT * WHERE {
       totalTime += partialZone.s;
     });
 
-    await new Promise(resolve => bindingsStream.on("end", resolve));
-
     for (let i = 0; i < zones.length; i++) {
       if (zones[i]) {
         zones[i].to = i === zones.length - 1 ? null : zones[i + 1].from;
@@ -708,8 +853,9 @@ SELECT * WHERE {
     return zones.length > 0 ? zones : null;
   }
 
-  private async complicatedQueryZones(statId: string, sources: [string, ...string[]]): Promise<ZoneModel[] | null> {
-    const bindingsStream = await this.queryEngine.queryBindings(
+  private async complicatedQueryZones(statId: string, store: OxigraphStore): Promise<ZoneModel[] | null> {
+    const bindingsResults = this.queryBindings(
+      store,
       `
 PREFIX activo: <https://solidlabresearch.github.io/activity-ontology#>
 SELECT ?zoneStart ?zoneIndex ?time ?percent ?to WHERE {
@@ -740,15 +886,11 @@ SELECT ?zoneStart ?zoneIndex ?time ?percent ?to WHERE {
   }
 }
 ORDER BY ?zoneIndex
-    `,
-      {
-        sources,
-        lenient: true
-      }
+    `
     );
 
     const zones = [];
-    bindingsStream.on("data", (bindings: Bindings) => {
+    bindingsResults.forEach(bindings => {
       const zone = {
         from: parseInt(bindings.get("zoneStart").value),
         s: parseFloat(bindings.get("time").value),
@@ -761,8 +903,6 @@ ORDER BY ?zoneIndex
       }
       zones[index] = zone;
     });
-
-    await new Promise(resolve => bindingsStream.on("end", resolve));
 
     return zones.length > 0 ? zones : null;
   }
@@ -782,13 +922,13 @@ ORDER BY ?zoneIndex
 
     const lit = (v: any) => {
       if (v === null || v === undefined) return null;
+      if (typeof v === "string" && /\d{4}-\d{2}-\d{2}T/.test(v))
+        return `"${new Date(v).toISOString()}"^^<${XSD}dateTime>`;
       if (typeof v === "string") return `"${v.replace(/"/g, '\\"')}"`;
       if (typeof v === "boolean") return `"${v}"^^<${XSD}boolean>`;
       if (typeof v === "number" && Number.isInteger(v)) return `"${v}"^^<${XSD}integer>`;
       if (typeof v === "number") return `"${v}"^^<${XSD}float>`;
-      if (v instanceof Date) return `"${v.toDateString()}"^^<${XSD}dateTime>`;
-      if (typeof v === "string" && /\d{4}-\d{2}-\d{2}T/.test(v))
-        return `"${new Date(v).toDateString()}"^^<${XSD}dateTime>`;
+      if (v instanceof Date) return `"${v.toISOString()}"^^<${XSD}dateTime>`;
       return `"${String(v).replace(/"/g, '\\"')}"`;
     };
 
@@ -807,38 +947,26 @@ ORDER BY ?zoneIndex
     ttl += `PREFIX foaf: <http://xmlns.com/foaf/0.1/>\n`;
     ttl += `PREFIX prov: <http://www.w3.org/ns/prov#>\n`;
     ttl += `PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n`;
+    ttl += `PREFIX skos: <http://www.w3.org/2004/02/skos/core#>\n`;
+    ttl += `PREFIX medtop: <${MEDTOP_NS}>\n`;
+    ttl += `PREFIX oaactivity: <${OAACTIVITY_NS}>\n`;
     ttl += `PREFIX activo: <https://solidlabresearch.github.io/activity-ontology#>\n\n`;
 
     addLink(activityIri, "a", "activo:Activity");
-    switch (activity.type) {
-      case ElevateSport.Ride:
-        addLink(activityIri, "a", "activo:Ride");
-        break;
-      case ElevateSport.Run:
-        addLink(activityIri, "a", "activo:Run");
-        break;
-      case ElevateSport.Swim:
-        addLink(activityIri, "a", "activo:Swim");
-        break;
+    const activityType = (activity as any).type;
+    if (typeof activityType === "string" && activityType) {
+      addLink(activityIri, "activo:activityType", activityTypeIriForElevateSport(activityType));
     }
 
     // ----------------- basic activity fields -----------------
     addLit(activityIri, "activo:name", (activity as any).name);
     addLit(activityIri, "activo:startTime", (activity as any).startTime);
     addLit(activityIri, "activo:endTime", (activity as any).endTime);
-    addLit(activityIri, "activo:hasPowerData", (activity as any).hasPowerMeter);
     addLit(activityIri, "activo:isTrainer", (activity as any).trainer);
     addLit(activityIri, "activo:isCommute", (activity as any).commute);
     addLit(activityIri, "activo:isManual", (activity as any).manual);
     addLit(activityIri, "activo:isSwimPool", (activity as any).isSwimPool);
     addLit(activityIri, "activo:hash", (activity as any).hash);
-    addLit(
-      activityIri,
-      "activo:isWithoutAthletePerformance",
-      (activity as any).settingsLack === undefined || (activity as any).settingsLack === null
-        ? false
-        : (activity as any).settingsLack
-    );
     addLit(activityIri, "prov:generatedAtTime", (activity as any).creationTime);
     addLit(activityIri, "activo:notes", (activity as any).notes);
     addLit(activityIri, "activo:isTypeAutoDetected", (activity as any).autoDetectedType);
@@ -849,35 +977,37 @@ ORDER BY ?zoneIndex
       addLit(activityIri, "activo:lonCenter", latLng[1]); // ontology
     }
 
-    // ----------------- athlete snapshot (ONLY) -----------------
+    // ----------------- athlete + settings used for computation -----------------
     const snap = (activity as any).athleteSnapshot; // { gender, age, athleteSettings }
     if (snap) {
-      const snapshotIri = mint("performanceSnapshot");
-      addLink(activityIri, "activo:hasPerformanceSnapshot", snapshotIri);
-      addLink(snapshotIri, "a", "activo:PerformanceSnapshot");
-      const athleteIri = mint("athlete");
+      const athleteIri = (activity as any).athleteId || mint("athlete");
+      const settingsHistoryIri = mint("athleteSettingsHistory");
+      const datedSettingsIri = mint("datedAthleteSettings");
       addLink(activityIri, "activo:hasAthlete", athleteIri);
-      addLink(athleteIri, "a", "foaf:Person");
-      addLink(snapshotIri, "activo:hasAthlete", athleteIri);
+      addLink(athleteIri, "a", "activo:Athlete");
+      addLink(athleteIri, "activo:hasAthleteSettingsHistory", settingsHistoryIri);
+      addLink(settingsHistoryIri, "a", "activo:AthleteSettingsHistory");
+      addLink(settingsHistoryIri, "activo:hasDatedAthleteSettings", datedSettingsIri);
+      addLink(datedSettingsIri, "a", "activo:DatedAthleteSettings");
 
       if ("gender" in snap) addLit(athleteIri, "foaf:gender", snap.gender);
       if ("age" in snap) addLit(athleteIri, "foaf:age", snap.age);
 
       const set = snap.athleteSettings as any;
       if (set) {
-        addLit(snapshotIri, "activo:maxHeartRate", set.maxHr);
-        addLit(snapshotIri, "activo:restHeartRate", set.restHr);
-        addLit(snapshotIri, "activo:weight", set.weight);
-        if (set.cyclingFtp != null) addLit(snapshotIri, "activo:cyclingFunctionalThresholdPower", set.cyclingFtp);
-        if (set.runningFtp != null) addLit(snapshotIri, "activo:runningFunctionalThresholdPower", set.runningFtp);
-        if (set.swimFtp != null) addLit(snapshotIri, "activo:swimmingFunctionalThresholdPower", set.swimFtp);
+        addLit(datedSettingsIri, "activo:maxHeartRate", set.maxHr);
+        addLit(datedSettingsIri, "activo:restHeartRate", set.restHr);
+        addLit(datedSettingsIri, "activo:weight", set.weight);
+        if (set.cyclingFtp != null) addLit(datedSettingsIri, "activo:cyclingFunctionalThresholdPower", set.cyclingFtp);
+        if (set.runningFtp != null) addLit(datedSettingsIri, "activo:runningFunctionalThresholdPace", set.runningFtp);
+        if (set.swimFtp != null) addLit(datedSettingsIri, "activo:swimmingFunctionalThresholdSpeed", set.swimFtp);
 
         const lthr = set.lthr as any;
         if (lthr) {
           // Write what exists; names match your earlier usage
-          if (lthr.default != null) addLit(snapshotIri, "activo:defaultLactateThreshold", lthr.default);
-          if (lthr.cycling != null) addLit(snapshotIri, "activo:cyclingLactateThreshold", lthr.cycling);
-          if (lthr.running != null) addLit(snapshotIri, "activo:runningLactateThreshold", lthr.running);
+          if (lthr.default != null) addLit(datedSettingsIri, "activo:defaultLactateThreshold", lthr.default);
+          if (lthr.cycling != null) addLit(datedSettingsIri, "activo:cyclingLactateThreshold", lthr.cycling);
+          if (lthr.running != null) addLit(datedSettingsIri, "activo:runningLactateThreshold", lthr.running);
         }
       }
     }
@@ -1061,9 +1191,9 @@ ORDER BY ?zoneIndex
       return iri;
     };
 
-    const writeScores = (statsIri: string, s?: Scores) => {
+    const writeScores = (statsIri: string, s?: Scores, context?: string) => {
       if (!s) return;
-      const i = mint("scores");
+      const i = mint(context ? `${context}-scores` : "scores");
       addLink(statsIri, "activo:hasScores", i);
       addLink(i, "a", "activo:Scores");
       if ("efficiency" in s) addLit(i, "activo:efficiency", s.efficiency);
@@ -1142,17 +1272,34 @@ ORDER BY ?zoneIndex
       }
     };
 
+    const writeStatsProvenance = (statsIri: string, slotName: "srcStats" | "stats") => {
+      if (slotName === "srcStats") {
+        const recordingIri = mint("sourceStats-recordingActivity");
+        const deviceIri = mint("sourceStats-device");
+        addLink(statsIri, "prov:wasGeneratedBy", recordingIri);
+        addLink(recordingIri, "a", "activo:RecordingActivity");
+        addLink(recordingIri, "prov:wasAssociatedWith", deviceIri);
+        addLink(deviceIri, "a", "activo:Device");
+        addLit(deviceIri, "foaf:name", (activity as any).device);
+        return;
+      }
+
+      const computationIri = mint("stats-computationActivity");
+      const applicationIri = mint("stats-application");
+      addLink(statsIri, "prov:wasGeneratedBy", computationIri);
+      addLink(computationIri, "a", "activo:StatsComputationActivity");
+      addLink(computationIri, "prov:wasAssociatedWith", applicationIri);
+      addLink(applicationIri, "a", "activo:Application");
+      addLit(applicationIri, "foaf:name", "Elevate");
+    };
+
     const writeStatsRoot = (slotName: "srcStats" | "stats", st?: any) => {
       if (!st) return;
       const iri = mint(slotName);
 
-      if (slotName === "srcStats") {
-        addLink(activityIri, "activo:hasSourceStats", iri);
-      }
-      if (slotName === "stats") {
-        addLink(activityIri, "activo:hasStats", iri);
-      }
+      addLink(activityIri, "activo:hasStats", iri);
       addLink(iri, "a", "activo:Stats");
+      writeStatsProvenance(iri, slotName);
 
       if ("distance" in st) addLit(iri, "activo:distance", st.distance);
       if ("elapsedTime" in st) addLit(iri, "activo:elapsedTime", st.elapsedTime);
@@ -1162,7 +1309,7 @@ ORDER BY ?zoneIndex
       if ("calories" in st) addLit(iri, "activo:calories", st.calories);
       if ("caloriesPerHour" in st) addLit(iri, "activo:caloriesPerHour", st.caloriesPerHour);
 
-      if ("scores" in st) writeScores(iri, st.scores);
+      if ("scores" in st) writeScores(iri, st.scores, slotName);
 
       writeMetricSet(iri, "SpeedStats", st.speed, { peaks: st?.speed?.peaks, zones: st?.speed?.zones }, slotName);
       writeMetricSet(iri, "PaceStats", st.pace, { peaks: st?.pace?.peaks, zones: st?.pace?.zones }, slotName);
