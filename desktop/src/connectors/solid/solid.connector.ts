@@ -96,7 +96,7 @@ import { AsyncIterator } from "asynciterator";
 import { ActivityDiscoveredEvent } from "@elevate/shared/sync/events/activity-discovered.event";
 import { Auth } from "trustflows-client";
 import { SolidAuthSession } from "@elevate/shared/sync/connectors/solid-connector-info.model";
-import { UmaAccessRequest } from "@elevate/shared/sync/uma/uma-access-request";
+import { UmaAccessRequest, UmaRequestedAction } from "@elevate/shared/sync/uma/uma-access-request";
 import { ActivityRDFMapper } from "../../../../appcore/src/app/shared/dao/activity/activityRDFMapper";
 import { activityRdfFetchCache } from "../../../../appcore/src/app/shared/dao/activity/rdf-fetch-cache";
 
@@ -128,6 +128,8 @@ export class SolidConnector extends BaseConnector {
   private static readonly BUFFER_SIZE: number = 10;
   private static readonly ID_TOKEN_CLAIM_FORMAT = "http://openid.net/specs/openid-connect-core-1_0.html#IDToken";
   private static readonly UMA_TOKEN_EXPIRY_SKEW_MS = 5000;
+  private static readonly UMA_ACCESS_POLL_DELAY_MS = 5000;
+  private static readonly UMA_ACCESS_POLL_ATTEMPTS = 60;
   private static sharedQueryEngine: QueryEngine | null = null;
 
   private static HumanizedDayMoment = class {
@@ -273,6 +275,8 @@ export class SolidConnector extends BaseConnector {
   private requestedAccessKeys: Set<string>;
   private umaTokenCache: Map<string, CachedUmaToken>;
   private umaMetadataCache: Map<string, Promise<UmaMetadata>>;
+  private umaAccessRequestUrlByTarget: Map<string, string>;
+  private lastUmaAccessRequestUrl: string | null;
 
   private readonly unknownDevicesReasonsIds: string[];
 
@@ -292,6 +296,8 @@ export class SolidConnector extends BaseConnector {
     this.requestedAccessKeys = new Set<string>();
     this.umaTokenCache = new Map<string, CachedUmaToken>();
     this.umaMetadataCache = new Map<string, Promise<UmaMetadata>>();
+    this.umaAccessRequestUrlByTarget = new Map<string, string>();
+    this.lastUmaAccessRequestUrl = null;
   }
 
   public configure(solidConnectorConfig: SolidConnectorConfig): this {
@@ -301,6 +307,8 @@ export class SolidConnector extends BaseConnector {
     activityRdfFetchCache.clear();
     this.umaTokenCache.clear();
     this.umaMetadataCache.clear();
+    this.umaAccessRequestUrlByTarget.clear();
+    this.lastUmaAccessRequestUrl = null;
     this.initializeAuthFetch();
     return this;
   }
@@ -372,7 +380,7 @@ export class SolidConnector extends BaseConnector {
           .queryBindings(
             `
 PREFIX ldp: <http://www.w3.org/ns/ldp#>
-PREFIX activo: <https://solidlabresearch.github.io/activity-ontology#>
+PREFIX activo: <https://w3id.org/activity-ontology#>
 PREFIX prov: <http://www.w3.org/ns/prov#>
 SELECT ?originalSource WHERE {
   <${rawActivitiesIRI}> ldp:contains ?originalSource .
@@ -902,7 +910,12 @@ SELECT ?activitiesContainer ?activityIri WHERE {
         if (rptResponse) {
           return rptResponse;
         }
-        await this.requestAccessOnUnauthorized(target, method, response);
+        if (await this.requestAccessOnUnauthorized(target, method, response)) {
+          return this.authFetch(input, init);
+        }
+        if (this.isSkippableActivityMetadataRead(target, method)) {
+          return this.emptyActivityMetadataResponse(target);
+        }
       }
       return response;
     } catch (error) {
@@ -910,7 +923,23 @@ SELECT ?activitiesContainer ?activityIri WHERE {
         this.logger.error(`[SolidConnector/Main] ${method} ${target} -> request error`, error);
       }
       if (this.isUmaAuthorizationError(error)) {
-        await this.requestAccessOnUnauthorized(target, method);
+        if (
+          await this.requestAccessOnUnauthorized(
+            target,
+            method,
+            undefined,
+            undefined,
+            !this.isSkippableActivityMetadataRead(target, method) && !this.isRawActivityRead(target, method)
+          )
+        ) {
+          return this.authFetch(input, init);
+        }
+        if (this.isSkippableActivityMetadataRead(target, method)) {
+          return this.emptyActivityMetadataResponse(target);
+        }
+        if (this.isRawActivityRead(target, method)) {
+          return this.inaccessibleRawActivityResponse(target);
+        }
       }
       throw error;
     }
@@ -930,35 +959,138 @@ SELECT ?activitiesContainer ?activityIri WHERE {
     return target.includes("/activities/") || target.includes("/raw-activities/");
   }
 
-  private async requestAccessOnUnauthorized(target: string, method: string, response?: Response): Promise<void> {
-    const requestKey = `${method} ${target}`;
+  private isSkippableActivityMetadataRead(target: string, method: string): boolean {
+    return (method === "GET" || method === "HEAD") && target.includes("/activities/") && target.endsWith(".ttl");
+  }
+
+  private emptyActivityMetadataResponse(target: string): Response {
+    this.logger.warn("[SolidConnector/Main] Skipping inaccessible Solid activity metadata resource", { target });
+    return new Response("", {
+      status: 200,
+      statusText: "Skipped inaccessible Solid activity metadata",
+      headers: { "Content-Type": "text/turtle" }
+    });
+  }
+
+  private isRawActivityRead(target: string, method: string): boolean {
+    return (method === "GET" || method === "HEAD") && target.includes("/raw-activities/");
+  }
+
+  private inaccessibleRawActivityResponse(target: string): Response {
+    this.logger.warn("[SolidConnector/Main] Skipping inaccessible raw Solid activity resource", { target });
+    return new Response("", {
+      status: 403,
+      statusText: "Skipped inaccessible raw Solid activity"
+    });
+  }
+
+  private async requestAccessOnUnauthorized(
+    target: string,
+    method: string,
+    response?: Response,
+    accessRequestUrl?: string,
+    waitForAccess = true
+  ): Promise<boolean> {
+    const requestedAction = UmaAccessRequest.actionForMethod(method);
+    const requestKey = this.accessRequestKey(target, requestedAction);
     if (this.requestedAccessKeys.has(requestKey)) {
-      return;
+      return waitForAccess ? this.waitForUmaAccess(target, method) : false;
     }
 
-    this.requestedAccessKeys.add(requestKey);
     const requestingParty =
       this.solidConnectorConfig?.info?.authSession?.webId || this.solidConnectorConfig?.info?.webId || null;
+    const resolvedAccessRequestUrl =
+      accessRequestUrl ||
+      this.umaAccessRequestUrlByTarget.get(target) ||
+      this.lastUmaAccessRequestUrl ||
+      (await this.discoverUmaAccessRequestUrlForTarget(target));
+    this.logger.info("[SolidConnector/Main] Preparing UMA access request", {
+      target,
+      method,
+      hasResponse: Boolean(response),
+      wwwAuthenticate: response?.headers?.get("WWW-Authenticate") || null,
+      explicitAccessRequestUrl: accessRequestUrl || null,
+      cachedAccessRequestUrl: this.umaAccessRequestUrlByTarget.get(target) || null,
+      lastUmaAccessRequestUrl: this.lastUmaAccessRequestUrl,
+      resolvedAccessRequestUrl,
+      hasRequestingParty: Boolean(requestingParty)
+    });
+    if (!resolvedAccessRequestUrl) {
+      this.logger.warn("[SolidConnector/Main] UMA access request URL is unavailable after probing target", {
+        target,
+        method
+      });
+      return false;
+    }
 
     try {
+      this.requestedAccessKeys.add(requestKey);
       const result = await UmaAccessRequest.request({
         fetch: fetch as unknown as typeof globalThis.fetch,
         requestingParty,
         requestedTarget: target,
-        requestedAction: UmaAccessRequest.actionForMethod(method),
-        response
+        requestedAction,
+        response,
+        accessRequestUrl: resolvedAccessRequestUrl
       });
 
       if (result.requested) {
         this.logger.info(
           `[SolidConnector/Main] UMA access request submitted for ${target} at ${result.accessRequestUrl}`
         );
+        return waitForAccess ? this.waitForUmaAccess(target, method) : false;
       } else {
         this.logger.warn(`[SolidConnector/Main] UMA access request was not submitted for ${target}: ${result.reason}`);
+        return false;
       }
     } catch (requestError) {
       this.logger.warn(`[SolidConnector/Main] Unable to submit UMA access request for ${target}.`, requestError);
+      return false;
     }
+  }
+
+  private accessRequestKey(target: string, requestedAction: UmaRequestedAction): string {
+    return `${requestedAction} ${target}`;
+  }
+
+  private async waitForUmaAccess(target: string, method: string): Promise<boolean> {
+    for (let attempt = 1; attempt <= SolidConnector.UMA_ACCESS_POLL_ATTEMPTS; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, SolidConnector.UMA_ACCESS_POLL_DELAY_MS));
+      try {
+        const response = await this.authFetch(target, {
+          method: method === "GET" || method === "HEAD" ? method : "HEAD"
+        });
+        this.logger.info("[SolidConnector/Main] Polled UMA access", {
+          target,
+          method,
+          attempt,
+          status: response.status,
+          statusText: response.statusText,
+          ok: response.ok
+        });
+        if (response.ok) {
+          return true;
+        }
+        if (response.status === 401) {
+          const challenge = this.parseUmaChallenge(response.headers.get("www-authenticate"));
+          this.rememberUmaAccessRequestUrl(target, challenge?.asUri);
+        }
+      } catch (error) {
+        this.logger.info("[SolidConnector/Main] UMA access poll still unauthorized", {
+          target,
+          method,
+          attempt,
+          error
+        });
+      }
+    }
+
+    this.logger.warn("[SolidConnector/Main] Timed out waiting for UMA access", {
+      target,
+      method,
+      attempts: SolidConnector.UMA_ACCESS_POLL_ATTEMPTS
+    });
+    return false;
   }
 
   private isUmaAuthorizationError(error: unknown): boolean {
@@ -980,7 +1112,16 @@ SELECT ?activitiesContainer ?activityIri WHERE {
     const target = this.resolveRequestTarget(input);
     const method = (init.method || "GET").toUpperCase();
     const idToken = this.solidConnectorConfig?.info?.authSession?.idToken;
-    const challenge = this.parseUmaChallenge(response.headers.get("www-authenticate"));
+    const wwwAuthenticate = response.headers.get("www-authenticate");
+    const challenge = this.parseUmaChallenge(wwwAuthenticate);
+    this.logger.info("[SolidConnector/Main] Parsed UMA challenge", {
+      target,
+      method,
+      status: response.status,
+      wwwAuthenticate,
+      challenge
+    });
+    this.rememberUmaAccessRequestUrl(target, challenge?.asUri);
     if (!challenge?.asUri || !challenge.ticket || !idToken) {
       this.logger.warn(
         `[SolidConnector/Main] ${method} ${target} -> UMA retry unavailable ` +
@@ -992,6 +1133,22 @@ SELECT ?activitiesContainer ?activityIri WHERE {
     }
 
     const rpt = await this.requestUmaToken(challenge, idToken, method, target);
+    if (!rpt) {
+      await this.requestAccessOnUnauthorized(
+        target,
+        method,
+        response,
+        UmaAccessRequest.accessRequestUrlFromAuthorizationServer(challenge.asUri),
+        !this.isSkippableActivityMetadataRead(target, method) && !this.isRawActivityRead(target, method)
+      );
+      if (this.isSkippableActivityMetadataRead(target, method)) {
+        return this.emptyActivityMetadataResponse(target);
+      }
+      if (this.isRawActivityRead(target, method)) {
+        return this.inaccessibleRawActivityResponse(target);
+      }
+      return null;
+    }
     if (!rpt.access_token || !rpt.token_type) {
       this.logger.warn(
         `[SolidConnector/Main] UMA token response for ${method} ${target} did not include a usable RPT.`
@@ -1019,7 +1176,7 @@ SELECT ?activitiesContainer ?activityIri WHERE {
     idToken: string,
     method: string,
     target: string
-  ): Promise<UmaTokenResponse> {
+  ): Promise<UmaTokenResponse | null> {
     const metadata = await this.discoverUmaMetadata(challenge.asUri);
     if (!metadata.token_endpoint) {
       throw new Error(`UMA metadata at ${challenge.asUri} does not include token_endpoint.`);
@@ -1040,6 +1197,13 @@ SELECT ?activitiesContainer ?activityIri WHERE {
       })
     });
     const body = await this.safeJson(tokenResponse);
+    if (tokenResponse.status === 403) {
+      this.logger.warn(
+        `[SolidConnector/Main] UMA token request for ${method} ${target} returned 403. ` +
+          "Requesting resource access instead."
+      );
+      return null;
+    }
     if (!tokenResponse.ok) {
       throw new Error(`UMA token request failed (${tokenResponse.status}): ${JSON.stringify(body)}`);
     }
@@ -1084,9 +1248,55 @@ SELECT ?activitiesContainer ?activityIri WHERE {
     }
 
     return {
-      asUri: params.as_uri || null,
+      asUri: params.as_uri || params.authorization_uri || params.issuer || null,
       ticket: params.ticket || null
     };
+  }
+
+  private rememberUmaAccessRequestUrl(target: string, asUri: string | null | undefined): void {
+    const accessRequestUrl = UmaAccessRequest.accessRequestUrlFromAuthorizationServer(asUri || null);
+    if (accessRequestUrl) {
+      this.umaAccessRequestUrlByTarget.set(target, accessRequestUrl);
+      this.lastUmaAccessRequestUrl = accessRequestUrl;
+      this.logger.info("[SolidConnector/Main] Remembered UMA access request URL", {
+        target,
+        asUri,
+        accessRequestUrl
+      });
+    } else {
+      this.logger.warn("[SolidConnector/Main] Could not derive UMA access request URL", {
+        target,
+        asUri: asUri || null
+      });
+    }
+  }
+
+  private async discoverUmaAccessRequestUrlForTarget(target: string): Promise<string | null> {
+    try {
+      const response = await fetch(target, {
+        method: "GET",
+        headers: { Accept: "text/turtle, application/ld+json;q=0.8" }
+      });
+      const wwwAuthenticate = response.headers.get("www-authenticate");
+      const challenge = this.parseUmaChallenge(wwwAuthenticate);
+      const accessRequestUrl = UmaAccessRequest.accessRequestUrlFromAuthorizationServer(challenge?.asUri || null);
+      this.logger.info("[SolidConnector/Main] Probed target for UMA access request URL", {
+        target,
+        status: response.status,
+        statusText: response.statusText,
+        wwwAuthenticate,
+        challenge,
+        accessRequestUrl
+      });
+      this.rememberUmaAccessRequestUrl(target, challenge?.asUri);
+      return accessRequestUrl;
+    } catch (error) {
+      this.logger.warn("[SolidConnector/Main] Unable to probe target for UMA access request URL", {
+        target,
+        error
+      });
+      return null;
+    }
   }
 
   private getCachedUmaToken(cacheKey: string): CachedUmaToken | null {

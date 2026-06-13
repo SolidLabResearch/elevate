@@ -10,7 +10,7 @@ import { v4 as uuidv4 } from "uuid";
 import { Subject } from "rxjs";
 import { Auth } from "trustflows-client";
 import { SolidAuthSession } from "@elevate/shared/sync/connectors/solid-connector-info.model";
-import { UmaAccessRequest } from "@elevate/shared/sync/uma/uma-access-request";
+import { UmaAccessRequest, UmaRequestedAction } from "@elevate/shared/sync/uma/uma-access-request";
 import { activityRdfFetchCache } from "./rdf-fetch-cache";
 import { DataFactory, Parser, Store } from "n3";
 
@@ -47,6 +47,8 @@ export class ActivityDao {
   private static readonly CONTAINER_CREATION_RETRY_DELAY_MS = 1000;
   private static readonly ID_TOKEN_CLAIM_FORMAT = "http://openid.net/specs/openid-connect-core-1_0.html#IDToken";
   private static readonly UMA_TOKEN_EXPIRY_SKEW_MS = 5000;
+  private static readonly UMA_ACCESS_POLL_DELAY_MS = 5000;
+  private static readonly UMA_ACCESS_POLL_ATTEMPTS = 60;
   private static sharedQueryEngine: QueryEngine | null = null;
 
   private source = "/activities";
@@ -62,6 +64,8 @@ export class ActivityDao {
   private requestedAccessKeys: Set<string> = new Set<string>();
   private umaTokenCache: Map<string, CachedUmaToken> = new Map<string, CachedUmaToken>();
   private umaMetadataCache: Map<string, Promise<UmaMetadata>> = new Map<string, Promise<UmaMetadata>>();
+  private umaAccessRequestUrlByTarget: Map<string, string> = new Map<string, string>();
+  private lastUmaAccessRequestUrl: string | null = null;
   private initialActivityLocationsPromise: Promise<void> | null = null;
   public newActivityLocations$: Subject<string> = new Subject<string>();
 
@@ -75,6 +79,8 @@ export class ActivityDao {
     activityRdfFetchCache.clear();
     this.umaTokenCache.clear();
     this.umaMetadataCache.clear();
+    this.umaAccessRequestUrlByTarget.clear();
+    this.lastUmaAccessRequestUrl = null;
     const baseFetch: typeof globalThis.fetch =
       typeof window !== "undefined" && typeof window.fetch === "function"
         ? window.fetch.bind(window)
@@ -293,7 +299,6 @@ export class ActivityDao {
     const containerIris = bases.map(base => `${base}${this.source}/`);
     for (const base of bases) {
       await this.ensureContainerExists(`${base}${this.source}/`);
-      await this.ensureContainerExists(`${base}${this.rawSource}/`);
     }
 
     console.info("[ActivityDao] Subscribing to activity location stream", { containerIris });
@@ -475,7 +480,12 @@ SELECT ?activityIri WHERE {
         if (rptResponse) {
           return rptResponse;
         }
-        await this.requestAccessOnUnauthorized(target, method, response);
+        if (await this.requestAccessOnUnauthorized(target, method, response)) {
+          return this.authFetch(input, init);
+        }
+        if (this.isSkippableActivityMetadataRead(target, method)) {
+          return this.emptyActivityMetadataResponse(target);
+        }
       }
       return response;
     } catch (error) {
@@ -483,7 +493,20 @@ SELECT ?activityIri WHERE {
         console.error(`[ActivityDao] ${method} ${target} -> request error`, error);
       }
       if (this.isUmaAuthorizationError(error)) {
-        await this.requestAccessOnUnauthorized(target, method);
+        if (
+          await this.requestAccessOnUnauthorized(
+            target,
+            method,
+            undefined,
+            undefined,
+            !this.isSkippableActivityMetadataRead(target, method)
+          )
+        ) {
+          return this.authFetch(input, init);
+        }
+        if (this.isSkippableActivityMetadataRead(target, method)) {
+          return this.emptyActivityMetadataResponse(target);
+        }
       }
       throw error;
     }
@@ -503,33 +526,124 @@ SELECT ?activityIri WHERE {
     return target.includes("/activities/") || target.includes("/raw-activities/");
   }
 
-  private async requestAccessOnUnauthorized(target: string, method: string, response?: Response): Promise<void> {
-    const requestKey = `${method} ${target}`;
+  private isSkippableActivityMetadataRead(target: string, method: string): boolean {
+    return (method === "GET" || method === "HEAD") && target.includes("/activities/") && target.endsWith(".ttl");
+  }
+
+  private emptyActivityMetadataResponse(target: string): Response {
+    console.warn("[ActivityDao] Skipping inaccessible Solid activity metadata resource", { target });
+    return new Response("", {
+      status: 200,
+      statusText: "Skipped inaccessible Solid activity metadata",
+      headers: { "Content-Type": "text/turtle" }
+    });
+  }
+
+  private async requestAccessOnUnauthorized(
+    target: string,
+    method: string,
+    response?: Response,
+    accessRequestUrl?: string,
+    waitForAccess = true
+  ): Promise<boolean> {
+    const requestedAction = UmaAccessRequest.actionForMethod(method);
+    const requestKey = this.accessRequestKey(target, requestedAction);
     if (this.requestedAccessKeys.has(requestKey)) {
-      return;
+      return waitForAccess ? this.waitForUmaAccess(target, method) : false;
     }
 
-    this.requestedAccessKeys.add(requestKey);
     const authSession = this.getLatestAuthSession();
     const requestingParty = this.auth.webId || authSession?.webId || this.solidConnectorInfoService.fetch().webId;
+    const resolvedAccessRequestUrl =
+      accessRequestUrl ||
+      this.umaAccessRequestUrlByTarget.get(target) ||
+      this.lastUmaAccessRequestUrl ||
+      (await this.discoverUmaAccessRequestUrlForTarget(target));
+    console.info("[ActivityDao] Preparing UMA access request", {
+      target,
+      method,
+      hasResponse: Boolean(response),
+      wwwAuthenticate: response?.headers?.get("WWW-Authenticate") || null,
+      explicitAccessRequestUrl: accessRequestUrl || null,
+      cachedAccessRequestUrl: this.umaAccessRequestUrlByTarget.get(target) || null,
+      lastUmaAccessRequestUrl: this.lastUmaAccessRequestUrl,
+      resolvedAccessRequestUrl,
+      hasRequestingParty: Boolean(requestingParty)
+    });
+    if (!resolvedAccessRequestUrl) {
+      console.warn("[ActivityDao] UMA access request URL is unavailable after probing target", {
+        target,
+        method
+      });
+      return false;
+    }
 
     try {
+      this.requestedAccessKeys.add(requestKey);
       const result = await UmaAccessRequest.request({
         fetch: typeof window !== "undefined" && typeof window.fetch === "function" ? window.fetch.bind(window) : fetch,
         requestingParty,
         requestedTarget: target,
-        requestedAction: UmaAccessRequest.actionForMethod(method),
-        response
+        requestedAction,
+        response,
+        accessRequestUrl: resolvedAccessRequestUrl
       });
 
       if (result.requested) {
         console.info(`[ActivityDao] UMA access request submitted for ${target} at ${result.accessRequestUrl}`);
+        return waitForAccess ? this.waitForUmaAccess(target, method) : false;
       } else {
         console.warn(`[ActivityDao] UMA access request was not submitted for ${target}: ${result.reason}`);
+        return false;
       }
     } catch (error) {
       console.warn(`[ActivityDao] Unable to submit UMA access request for ${target}.`, error);
+      return false;
     }
+  }
+
+  private accessRequestKey(target: string, requestedAction: UmaRequestedAction): string {
+    return `${requestedAction} ${target}`;
+  }
+
+  private async waitForUmaAccess(target: string, method: string): Promise<boolean> {
+    for (let attempt = 1; attempt <= ActivityDao.UMA_ACCESS_POLL_ATTEMPTS; attempt++) {
+      await this.sleep(ActivityDao.UMA_ACCESS_POLL_DELAY_MS);
+      try {
+        const response = await this.authFetch(target, {
+          method: method === "GET" || method === "HEAD" ? method : "HEAD"
+        });
+        console.info("[ActivityDao] Polled UMA access", {
+          target,
+          method,
+          attempt,
+          status: response.status,
+          statusText: response.statusText,
+          ok: response.ok
+        });
+        if (response.ok) {
+          return true;
+        }
+        if (response.status === 401) {
+          const challenge = this.parseUmaChallenge(response.headers.get("www-authenticate"));
+          this.rememberUmaAccessRequestUrl(target, challenge?.asUri);
+        }
+      } catch (error) {
+        console.info("[ActivityDao] UMA access poll still unauthorized", {
+          target,
+          method,
+          attempt,
+          error
+        });
+      }
+    }
+
+    console.warn("[ActivityDao] Timed out waiting for UMA access", {
+      target,
+      method,
+      attempts: ActivityDao.UMA_ACCESS_POLL_ATTEMPTS
+    });
+    return false;
   }
 
   private isUmaAuthorizationError(error: unknown): boolean {
@@ -552,7 +666,16 @@ SELECT ?activityIri WHERE {
     const method = (init.method || "GET").toUpperCase();
     const authSession = this.getLatestAuthSession();
     const idToken = authSession?.idToken || this.auth.oidcToken || null;
-    const challenge = this.parseUmaChallenge(response.headers.get("www-authenticate"));
+    const wwwAuthenticate = response.headers.get("www-authenticate");
+    const challenge = this.parseUmaChallenge(wwwAuthenticate);
+    console.info("[ActivityDao] Parsed UMA challenge", {
+      target,
+      method,
+      status: response.status,
+      wwwAuthenticate,
+      challenge
+    });
+    this.rememberUmaAccessRequestUrl(target, challenge?.asUri);
     if (!challenge?.asUri || !challenge.ticket || !idToken) {
       console.warn(
         `[ActivityDao] ${method} ${target} -> UMA retry unavailable ` +
@@ -564,6 +687,19 @@ SELECT ?activityIri WHERE {
     }
 
     const rpt = await this.requestUmaToken(challenge, idToken, method, target);
+    if (!rpt) {
+      await this.requestAccessOnUnauthorized(
+        target,
+        method,
+        response,
+        UmaAccessRequest.accessRequestUrlFromAuthorizationServer(challenge.asUri),
+        !this.isSkippableActivityMetadataRead(target, method)
+      );
+      if (this.isSkippableActivityMetadataRead(target, method)) {
+        return this.emptyActivityMetadataResponse(target);
+      }
+      return null;
+    }
     if (!rpt.access_token || !rpt.token_type) {
       console.warn(`[ActivityDao] UMA token response for ${method} ${target} did not include a usable RPT.`);
       return null;
@@ -587,7 +723,7 @@ SELECT ?activityIri WHERE {
     idToken: string,
     method: string,
     target: string
-  ): Promise<UmaTokenResponse> {
+  ): Promise<UmaTokenResponse | null> {
     const metadata = await this.discoverUmaMetadata(challenge.asUri);
     if (!metadata.token_endpoint) {
       throw new Error(`UMA metadata at ${challenge.asUri} does not include token_endpoint.`);
@@ -608,6 +744,12 @@ SELECT ?activityIri WHERE {
       })
     });
     const body = await this.safeJson(tokenResponse);
+    if (tokenResponse.status === 403) {
+      console.warn(
+        `[ActivityDao] UMA token request for ${method} ${target} returned 403. ` + "Requesting resource access instead."
+      );
+      return null;
+    }
     if (!tokenResponse.ok) {
       throw new Error(`UMA token request failed (${tokenResponse.status}): ${JSON.stringify(body)}`);
     }
@@ -654,9 +796,55 @@ SELECT ?activityIri WHERE {
     }
 
     return {
-      asUri: params.as_uri || null,
+      asUri: params.as_uri || params.authorization_uri || params.issuer || null,
       ticket: params.ticket || null
     };
+  }
+
+  private rememberUmaAccessRequestUrl(target: string, asUri: string | null | undefined): void {
+    const accessRequestUrl = UmaAccessRequest.accessRequestUrlFromAuthorizationServer(asUri || null);
+    if (accessRequestUrl) {
+      this.umaAccessRequestUrlByTarget.set(target, accessRequestUrl);
+      this.lastUmaAccessRequestUrl = accessRequestUrl;
+      console.info("[ActivityDao] Remembered UMA access request URL", {
+        target,
+        asUri,
+        accessRequestUrl
+      });
+    } else {
+      console.warn("[ActivityDao] Could not derive UMA access request URL", {
+        target,
+        asUri: asUri || null
+      });
+    }
+  }
+
+  private async discoverUmaAccessRequestUrlForTarget(target: string): Promise<string | null> {
+    try {
+      const response = await this.baseFetch(target, {
+        method: "GET",
+        headers: { Accept: "text/turtle, application/ld+json;q=0.8" }
+      });
+      const wwwAuthenticate = response.headers.get("www-authenticate");
+      const challenge = this.parseUmaChallenge(wwwAuthenticate);
+      const accessRequestUrl = UmaAccessRequest.accessRequestUrlFromAuthorizationServer(challenge?.asUri || null);
+      console.info("[ActivityDao] Probed target for UMA access request URL", {
+        target,
+        status: response.status,
+        statusText: response.statusText,
+        wwwAuthenticate,
+        challenge,
+        accessRequestUrl
+      });
+      this.rememberUmaAccessRequestUrl(target, challenge?.asUri);
+      return accessRequestUrl;
+    } catch (error) {
+      console.warn("[ActivityDao] Unable to probe target for UMA access request URL", {
+        target,
+        error
+      });
+      return null;
+    }
   }
 
   private getCachedUmaToken(cacheKey: string): CachedUmaToken | null {
@@ -799,7 +987,7 @@ SELECT ?activityIri WHERE {
       return [...containers, ...activityLocations] as [string, ...string[]];
     }
     if (!this.solidConnectorInfoService.fetch() || this.solidConnectorInfoService.fetch().base === "") {
-      return Promise.resolve(["https://solidlabresearch.github.io/activity-ontology/", ...sources]);
+      return Promise.resolve(["https://w3id.org/activity-ontology/", ...sources]);
     }
     return Promise.resolve([...sources]) as Promise<[string, ...string[]]>;
   }

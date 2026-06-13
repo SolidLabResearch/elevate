@@ -4,36 +4,62 @@ export interface UmaAccessRequestOptions {
   requestedTarget: string;
   response?: Response;
   requestedAction?: UmaRequestedAction;
+  requestedActions?: UmaRequestedAction[];
   accessRequestUrl?: string;
 }
 
-export type UmaRequestedAction = "read" | "write" | "delete";
+export type UmaRequestedAction = "read" | "write" | "create" | "delete";
 
 export interface UmaAccessRequestResult {
   requested: boolean;
-  accessRequestUrl: string;
+  accessRequestUrl?: string;
   status?: number;
   statusText?: string;
   reason?: string;
 }
 
 export class UmaAccessRequest {
-  public static readonly DEFAULT_ACCESS_REQUEST_URL = "http://as.local:4000/uma/requests";
-
   private static readonly SOTW_PREFIX = "https://w3id.org/force/sotw#";
   private static readonly ODRL_PREFIX = "http://www.w3.org/ns/odrl/2/";
   private static readonly EX_PREFIX = "http://example.org/";
 
   public static async request(options: UmaAccessRequestOptions): Promise<UmaAccessRequestResult> {
+    const accessRequestUrl = UmaAccessRequest.resolveAccessRequestUrl(options.response, options.accessRequestUrl);
+    if (!accessRequestUrl) {
+      console.warn("[UmaAccessRequest] Unable to resolve access request URL", {
+        requestedTarget: options.requestedTarget,
+        hasResponse: Boolean(options.response),
+        fallback: options.accessRequestUrl || null,
+        wwwAuthenticate: options.response?.headers?.get("WWW-Authenticate") || null,
+        parsedAuthorizationServer: UmaAccessRequest.parseUmaAuthorizationServer(
+          options.response?.headers?.get("WWW-Authenticate")
+        )
+      });
+      return {
+        requested: false,
+        reason: "Unable to resolve UMA access request URL from authorization server challenge."
+      };
+    }
+
+    console.info("[UmaAccessRequest] Submitting UMA access request", {
+      accessRequestUrl,
+      requestedTarget: options.requestedTarget,
+      requestedActions: UmaAccessRequest.normalizeActions(
+        options.requestedActions || [options.requestedAction || "read"]
+      ),
+      hasResponse: Boolean(options.response),
+      fallback: options.accessRequestUrl || null,
+      wwwAuthenticate: options.response?.headers?.get("WWW-Authenticate") || null
+    });
+
     if (!options.requestingParty) {
       return {
         requested: false,
-        accessRequestUrl: UmaAccessRequest.resolveAccessRequestUrl(options.response, options.accessRequestUrl),
+        accessRequestUrl,
         reason: "Missing requesting party WebID."
       };
     }
 
-    const accessRequestUrl = UmaAccessRequest.resolveAccessRequestUrl(options.response, options.accessRequestUrl);
     const response = await options.fetch(accessRequestUrl, {
       method: "POST",
       headers: {
@@ -43,7 +69,7 @@ export class UmaAccessRequest {
       body: UmaAccessRequest.buildTurtle(
         options.requestingParty,
         options.requestedTarget,
-        options.requestedAction || "read"
+        UmaAccessRequest.normalizeActions(options.requestedActions || [options.requestedAction || "read"])
       )
     });
 
@@ -56,17 +82,24 @@ export class UmaAccessRequest {
     };
   }
 
-  public static resolveAccessRequestUrl(response?: Response, fallback?: string): string {
+  public static resolveAccessRequestUrl(response?: Response, fallback?: string): string | null {
     const asUri = UmaAccessRequest.parseUmaAuthorizationServer(response?.headers?.get("WWW-Authenticate"));
     if (!asUri) {
-      return fallback || UmaAccessRequest.DEFAULT_ACCESS_REQUEST_URL;
+      return fallback || null;
     }
 
+    return UmaAccessRequest.accessRequestUrlFromAuthorizationServer(asUri) || fallback || null;
+  }
+
+  public static accessRequestUrlFromAuthorizationServer(asUri: string | null): string | null {
+    if (!asUri) {
+      return null;
+    }
     try {
       const url = new URL(asUri);
       return `${url.origin}/uma/requests`;
     } catch {
-      return fallback || UmaAccessRequest.DEFAULT_ACCESS_REQUEST_URL;
+      return null;
     }
   }
 
@@ -74,8 +107,9 @@ export class UmaAccessRequest {
     switch ((method || "GET").toUpperCase()) {
       case "DELETE":
         return "delete";
-      case "PATCH":
       case "POST":
+        return "create";
+      case "PATCH":
       case "PUT":
         return "write";
       default:
@@ -86,12 +120,12 @@ export class UmaAccessRequest {
   private static buildTurtle(
     requestingParty: string,
     requestedTarget: string,
-    requestedAction: UmaRequestedAction
+    requestedActions: UmaRequestedAction[]
   ): string {
     const requestIri = `http://example.org/access-request/${Date.now()}-${UmaAccessRequest.hashIri(
       requestingParty
     )}-${UmaAccessRequest.hashIri(requestedTarget)}`;
-    const odrlAction = UmaAccessRequest.toOdrlAction(requestedAction);
+    const odrlActions = requestedActions.map(action => UmaAccessRequest.toOdrlAction(action)).join(", ");
 
     return [
       `@prefix sotw: <${UmaAccessRequest.SOTW_PREFIX}> .`,
@@ -100,16 +134,22 @@ export class UmaAccessRequest {
       "",
       `<${UmaAccessRequest.escapeIri(requestIri)}> a sotw:EvaluationRequest ;`,
       `  sotw:requestedTarget <${UmaAccessRequest.escapeIri(requestedTarget)}> ;`,
-      `  sotw:requestedAction ${odrlAction} ;`,
+      `  sotw:requestedAction ${odrlActions} ;`,
       `  sotw:requestingParty <${UmaAccessRequest.escapeIri(requestingParty)}> ;`,
       "  ex:requestStatus ex:requested ."
     ].join("\n");
+  }
+
+  private static normalizeActions(actions: UmaRequestedAction[]): UmaRequestedAction[] {
+    return Array.from(new Set(actions.filter(Boolean)));
   }
 
   private static toOdrlAction(action: UmaRequestedAction): string {
     switch (action) {
       case "delete":
         return "odrl:delete";
+      case "create":
+        return "odrl:create";
       case "write":
         return "odrl:write";
       default:

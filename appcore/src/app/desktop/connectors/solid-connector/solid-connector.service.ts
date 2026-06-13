@@ -13,6 +13,7 @@ import { IpcMessage } from "@elevate/shared/electron/ipc-message";
 import { Channel } from "@elevate/shared/electron/channels.enum";
 import { SolidAuthSession } from "@elevate/shared/sync/connectors/solid-connector-info.model";
 import { UmaAccessRequest } from "@elevate/shared/sync/uma/uma-access-request";
+import { UmaRequestedAction } from "@elevate/shared/sync/uma/uma-access-request";
 import { ElectronService } from "../../electron/electron.service";
 import { AthleteService } from "../../../shared/services/athlete/athlete.service";
 import { UserSettingsService } from "../../../shared/services/user-settings/user-settings.service";
@@ -23,6 +24,7 @@ import { UserZonesModel } from "@elevate/shared/models/user-settings/user-zones.
 import { ActivityDao } from "../../../shared/dao/activity/activity.dao";
 import { Activity } from "@elevate/shared/models/sync/activity.model";
 import { ActivityFileType } from "@elevate/shared/sync/connectors/activity-file-type.enum";
+import { DataFactory, Parser, Store } from "n3";
 
 interface SolidDesktopAuthResult {
   accessToken: string | null;
@@ -69,6 +71,8 @@ export class SolidConnectorService extends ConnectorService {
   private readonly auth: Auth;
   private readonly authFetch: typeof globalThis.fetch;
   private readonly requestedAccessKeys: Set<string> = new Set<string>();
+  private readonly umaAccessRequestUrlByTarget: Map<string, string> = new Map<string, string>();
+  private lastUmaAccessRequestUrl: string | null = null;
   private readonly rawActivityCache: Map<string, ArrayBuffer> = new Map<string, ArrayBuffer>();
 
   constructor(
@@ -105,7 +109,7 @@ export class SolidConnectorService extends ConnectorService {
         issuer && issuer.trim().length > 0 ? issuer.trim() : null,
         SolidConnectorInfo.DEFAULT_CLIENT_ID_URL,
         null,
-        solidConnectorInfo.dataWebId,
+        null,
         solidConnectorInfo.aggregatorBaseUrl,
         solidConnectorInfo.aggregatorUrl,
         solidConnectorInfo.followingAthleteWebIds,
@@ -141,13 +145,13 @@ export class SolidConnectorService extends ConnectorService {
     }
 
     const solidConnectorInfo = this.solidConnectorInfoService.fetch();
-    const updated = this.solidConnectorInfoService.save(
+    const updated = this.selectLoggedInAthlete(
       new SolidConnectorInfo(
         this.auth.webId || solidConnectorInfo.webId,
         solidConnectorInfo.issuer,
         solidConnectorInfo.clientId,
         this.buildCurrentAuthSession(solidConnectorInfo),
-        solidConnectorInfo.dataWebId || this.auth.webId || solidConnectorInfo.webId,
+        null,
         solidConnectorInfo.aggregatorBaseUrl,
         solidConnectorInfo.aggregatorUrl,
         solidConnectorInfo.followingAthleteWebIds,
@@ -155,7 +159,7 @@ export class SolidConnectorService extends ConnectorService {
       )
     );
     await this.ensureDefaultContainers();
-    return updated;
+    return (await this.restoreConnectorPreferencesFromPod()) || updated;
   }
 
   public async logout(): Promise<SolidConnectorInfo> {
@@ -165,20 +169,7 @@ export class SolidConnectorService extends ConnectorService {
       await this.auth.logout(this.getCurrentRedirectUri());
     }
 
-    const solidConnectorInfo = this.solidConnectorInfoService.fetch();
-    return this.solidConnectorInfoService.save(
-      new SolidConnectorInfo(
-        null,
-        solidConnectorInfo.issuer,
-        solidConnectorInfo.clientId,
-        null,
-        solidConnectorInfo.dataWebId,
-        solidConnectorInfo.aggregatorBaseUrl,
-        solidConnectorInfo.aggregatorUrl,
-        solidConnectorInfo.followingAthleteWebIds,
-        solidConnectorInfo.selectedAthleteWebIds
-      )
-    );
+    return this.solidConnectorInfoService.resetLoggedOutState();
   }
 
   public async isLoggedIn(): Promise<boolean> {
@@ -235,6 +226,7 @@ export class SolidConnectorService extends ConnectorService {
 
     try {
       await this.ensureDefaultContainers();
+      await this.restoreConnectorPreferencesFromPod();
       await this.writeCurrentSettingsToPod();
     } catch (error) {
       console.warn("[SolidConnectorService] Solid login succeeded, but post-login pod initialization failed.", error);
@@ -254,6 +246,11 @@ export class SolidConnectorService extends ConnectorService {
     await this.writeCurrentSettingsToPod();
     await this.ensureAggregatorInitialized();
     return this.desktopSyncService.sync(null, null, ConnectorType.SOLID);
+  }
+
+  public async writeConnectorPreferencesToPod(): Promise<void> {
+    await this.ensureDefaultContainers();
+    await this.writeCurrentSettingsToPod();
   }
 
   /**
@@ -281,6 +278,13 @@ export class SolidConnectorService extends ConnectorService {
       fileType
     });
     const rawActivityBuffer = await this.getRawActivityBuffer(rawActivityPath);
+    if (!rawActivityBuffer) {
+      console.warn("[SolidStreamsTiming] raw activity stream unavailable, skipping stream compute", {
+        activityId: activity.id,
+        rawActivityPath
+      });
+      return null;
+    }
     console.info("[SolidStreamsTiming] raw activity buffer ready", {
       activityId: activity.id,
       elapsedMs: Date.now() - startedAt,
@@ -410,12 +414,14 @@ export class SolidConnectorService extends ConnectorService {
       throw new Error("Solid issuer is required before initializing the aggregator.");
     }
     if (!solidConnectorInfo.base) {
-      throw new Error("Data WebID is required before initializing the aggregator.");
+      throw new Error("Selected athlete is required before initializing the aggregator.");
     }
 
     const existing = await this.findAggregatorInstance(aggregatorBaseUrl, solidConnectorInfo.aggregatorUrl);
     if (existing) {
-      return this.saveAggregatorInfo(aggregatorBaseUrl, existing);
+      const saved = this.saveAggregatorInfo(aggregatorBaseUrl, existing);
+      await this.writeCurrentSettingsToPod();
+      return saved;
     }
 
     const authorizationStart = await this.startAggregatorAuthorization(aggregatorBaseUrl, solidConnectorInfo);
@@ -428,7 +434,9 @@ export class SolidConnectorService extends ConnectorService {
           result.state,
           authorizationStart.redirectUri
         );
-        return this.saveAggregatorInfo(aggregatorBaseUrl, aggregatorUrl);
+        const saved = this.saveAggregatorInfo(aggregatorBaseUrl, aggregatorUrl);
+        await this.writeCurrentSettingsToPod();
+        return saved;
       }
     } else {
       await this.electronService.openExternalUrl(authorizationStart.authorizationUrl);
@@ -439,23 +447,32 @@ export class SolidConnectorService extends ConnectorService {
       throw new Error("Aggregator login was started. Complete it in the browser, then retry sync.");
     }
 
-    return this.saveAggregatorInfo(aggregatorBaseUrl, initialized);
+    const saved = this.saveAggregatorInfo(aggregatorBaseUrl, initialized);
+    await this.writeCurrentSettingsToPod();
+    return saved;
   }
 
   private async ensureDefaultContainers(): Promise<void> {
     const base = this.solidConnectorInfoService.fetch().base;
-    if (!base) {
+    const loggedInBase = this.getLoggedInBase();
+    if (!base && !loggedInBase) {
       return;
     }
 
-    await this.ensureContainerExists(`${base}/activities/`);
-    await this.ensureContainerExists(`${base}/raw-activities/`);
-    await this.ensureContainerExists(`${base}/settings/`);
+    if (base) {
+      await this.ensureContainerExists(`${base}/activities/`);
+      await this.ensureContainerExists(`${base}/raw-activities/`);
+      await this.ensureContainerExists(`${base}/settings/`);
+    }
+    if (loggedInBase && loggedInBase !== base) {
+      await this.ensureContainerExists(`${loggedInBase}/settings/`);
+    }
   }
 
   private async writeCurrentSettingsToPod(): Promise<void> {
     const base = this.solidConnectorInfoService.fetch().base;
-    if (!base) {
+    const loggedInBase = this.getLoggedInBase();
+    if (!base && !loggedInBase) {
       return;
     }
 
@@ -464,13 +481,36 @@ export class SolidConnectorService extends ConnectorService {
       this.userSettingsService.fetch()
     ]);
 
-    await Promise.all([
-      this.putTurtle(`${base}/settings/elevate-athlete.ttl`, this.serializeAthleteModelAsTurtle(athleteModel)),
-      this.putTurtle(`${base}/settings/elevate-user.ttl`, this.serializeUserSettingsAsTurtle(userSettings))
-    ]);
+    await Promise.all(
+      [
+        base
+          ? this.putTurtleIfMissing(
+              `${base}/settings/elevate-athlete.ttl`,
+              this.serializeAthleteModelAsTurtle(athleteModel)
+            )
+          : null,
+        loggedInBase
+          ? this.putTurtleIfMissing(
+              `${loggedInBase}/settings/elevate-user.ttl`,
+              this.serializeUserSettingsAsTurtle(userSettings)
+            )
+          : null
+      ].filter(Boolean)
+    );
   }
 
-  private async putTurtle(resourceIri: string, turtle: string): Promise<void> {
+  private async putTurtleIfMissing(resourceIri: string, turtle: string): Promise<void> {
+    const existing = await this.fetchWithAccessTokenFirst(resourceIri, {
+      headers: { Accept: "text/turtle" }
+    });
+    if (existing.ok) {
+      console.info("[SolidConnectorService] Solid settings resource already exists, skipping PUT", { resourceIri });
+      return;
+    }
+    if (existing.status !== 404) {
+      throw new Error(`Failed to check Solid settings ${resourceIri}: ${existing.status} ${existing.statusText}`);
+    }
+
     const response = await this.fetchWithAccessTokenFirst(resourceIri, {
       method: "PUT",
       headers: {
@@ -482,6 +522,11 @@ export class SolidConnectorService extends ConnectorService {
     if (!response.ok) {
       throw new Error(`Failed to write Solid settings ${resourceIri}: ${response.status} ${response.statusText}`);
     }
+  }
+
+  private getLoggedInBase(): string {
+    const solidConnectorInfo = this.solidConnectorInfoService.fetch();
+    return SolidConnectorInfo.webIdToBase(this.auth.webId || solidConnectorInfo.webId);
   }
 
   private async ensureContainerExists(containerIri: string): Promise<void> {
@@ -524,7 +569,10 @@ export class SolidConnectorService extends ConnectorService {
         logFn(`[SolidConnectorService] ${method} ${target} -> ${response.status} ${response.statusText} (${outcome})`);
       }
       if (response.status === 401) {
-        await this.requestAccessOnUnauthorized(target, method, response);
+        this.rememberUmaAccessRequestUrl(target, response);
+        if (await this.requestAccessOnUnauthorized(target, method, response)) {
+          return this.authFetch(input, init);
+        }
       }
       return response;
     } catch (error) {
@@ -532,7 +580,10 @@ export class SolidConnectorService extends ConnectorService {
         console.error(`[SolidConnectorService] ${method} ${target} -> request error`, error);
       }
       if (this.isUmaAuthorizationError(error)) {
-        await this.requestAccessOnUnauthorized(target, method);
+        this.logUmaAuthorizationError(target, method, error);
+        if (await this.requestAccessOnUnauthorized(target, method)) {
+          return this.authFetch(input, init);
+        }
       }
       throw error;
     }
@@ -552,35 +603,160 @@ export class SolidConnectorService extends ConnectorService {
     return target.includes("/activities/") || target.includes("/raw-activities/") || target.includes("/settings/");
   }
 
-  private async requestAccessOnUnauthorized(target: string, method: string, response?: Response): Promise<void> {
-    const requestKey = `${method} ${target}`;
-    if (this.requestedAccessKeys.has(requestKey)) {
-      return;
+  private async requestAccessOnUnauthorized(
+    target: string,
+    method: string,
+    response?: Response,
+    waitForAccess = true
+  ): Promise<boolean> {
+    const requestedActions = this.accessActionsForTarget(target, method);
+    const actionsToRequest = requestedActions.filter(
+      action => !this.requestedAccessKeys.has(this.accessRequestKey(target, action))
+    );
+    if (actionsToRequest.length === 0) {
+      return waitForAccess ? this.waitForUmaAccess(target, method) : false;
     }
 
-    this.requestedAccessKeys.add(requestKey);
     const solidConnectorInfo = this.solidConnectorInfoService.fetch();
     const requestingParty = this.auth.webId || solidConnectorInfo.authSession?.webId || solidConnectorInfo.webId;
+    const resolvedAccessRequestUrl =
+      this.umaAccessRequestUrlByTarget.get(target) ||
+      this.lastUmaAccessRequestUrl ||
+      (await this.discoverUmaAccessRequestUrlForTarget(target));
+    console.info("[SolidConnectorService] Preparing UMA access request", {
+      target,
+      method,
+      hasResponse: Boolean(response),
+      wwwAuthenticate: response?.headers?.get("WWW-Authenticate") || null,
+      cachedAccessRequestUrl: this.umaAccessRequestUrlByTarget.get(target) || null,
+      lastUmaAccessRequestUrl: this.lastUmaAccessRequestUrl,
+      resolvedAccessRequestUrl,
+      hasRequestingParty: Boolean(requestingParty)
+    });
+    if (!resolvedAccessRequestUrl) {
+      console.warn("[SolidConnectorService] UMA access request URL is unavailable after probing target", {
+        target,
+        method
+      });
+      return false;
+    }
 
     try {
+      actionsToRequest.forEach(action => this.requestedAccessKeys.add(this.accessRequestKey(target, action)));
+      const requested = await this.submitSeparateUmaAccessRequests(
+        target,
+        actionsToRequest,
+        requestingParty,
+        resolvedAccessRequestUrl,
+        response
+      );
+
+      if (requested) {
+        console.info(
+          `[SolidConnectorService] UMA access request submitted for ${target} at ${resolvedAccessRequestUrl}`
+        );
+        return waitForAccess ? this.waitForUmaAccess(target, method) : false;
+      } else {
+        console.warn(`[SolidConnectorService] UMA access request was not submitted for ${target}.`);
+        return false;
+      }
+    } catch (error) {
+      console.warn(`[SolidConnectorService] Unable to submit UMA access request for ${target}.`, error);
+      return false;
+    }
+  }
+
+  private async submitSeparateUmaAccessRequests(
+    target: string,
+    requestedActions: UmaRequestedAction[],
+    requestingParty: string | null,
+    accessRequestUrl: string,
+    response?: Response
+  ): Promise<boolean> {
+    let submitted = true;
+    for (const requestedAction of Array.from(new Set(requestedActions))) {
       const result = await UmaAccessRequest.request({
         fetch: typeof window !== "undefined" && typeof window.fetch === "function" ? window.fetch.bind(window) : fetch,
         requestingParty,
         requestedTarget: target,
-        requestedAction: UmaAccessRequest.actionForMethod(method),
-        response
+        requestedAction,
+        response,
+        accessRequestUrl
       });
-
       if (result.requested) {
-        console.info(
-          `[SolidConnectorService] UMA access request submitted for ${target} at ${result.accessRequestUrl}`
-        );
+        console.info("[SolidConnectorService] Submitted UMA access request", {
+          target,
+          requestedAction,
+          accessRequestUrl: result.accessRequestUrl
+        });
       } else {
-        console.warn(`[SolidConnectorService] UMA access request was not submitted for ${target}: ${result.reason}`);
+        submitted = false;
+        console.warn("[SolidConnectorService] UMA access request was not submitted", {
+          target,
+          requestedAction,
+          reason: result.reason
+        });
       }
-    } catch (error) {
-      console.warn(`[SolidConnectorService] Unable to submit UMA access request for ${target}.`, error);
     }
+    return submitted;
+  }
+
+  private accessActionsForTarget(target: string, method: string): UmaRequestedAction[] {
+    switch ((method || "GET").toUpperCase()) {
+      case "DELETE":
+        return ["delete"];
+      case "POST":
+        return ["create"];
+      case "PUT":
+        return target.endsWith("/") ? ["create"] : ["write"];
+      case "PATCH":
+        return ["write"];
+      default:
+        return ["read"];
+    }
+  }
+
+  private accessRequestKey(target: string, requestedAction: UmaRequestedAction): string {
+    return `${requestedAction} ${target}`;
+  }
+
+  private async waitForUmaAccess(target: string, method: string): Promise<boolean> {
+    for (let attempt = 1; attempt <= SolidConnectorService.AGGREGATOR_POLL_ATTEMPTS; attempt++) {
+      await this.sleep(SolidConnectorService.AGGREGATOR_ACCESS_POLL_DELAY_MS);
+      try {
+        const response = await this.authFetch(target, {
+          method: method === "GET" || method === "HEAD" ? method : "HEAD"
+        });
+        console.info("[SolidConnectorService] Polled UMA access", {
+          target,
+          method,
+          attempt,
+          status: response.status,
+          statusText: response.statusText,
+          ok: response.ok
+        });
+        if (response.ok) {
+          return true;
+        }
+        if (response.status === 401) {
+          this.rememberUmaAccessRequestUrl(target, response);
+        }
+      } catch (error) {
+        console.info("[SolidConnectorService] UMA access poll still unauthorized", {
+          target,
+          method,
+          attempt,
+          error
+        });
+      }
+    }
+
+    console.warn("[SolidConnectorService] Timed out waiting for UMA access", {
+      target,
+      method,
+      attempts: SolidConnectorService.AGGREGATOR_POLL_ATTEMPTS
+    });
+    return false;
   }
 
   private isUmaAuthorizationError(error: unknown): boolean {
@@ -591,6 +767,20 @@ export class SolidConnectorService extends ConnectorService {
       authorizationError?.status === 401 ||
       authorizationError?.status === 403
     );
+  }
+
+  private logUmaAuthorizationError(target: string, method: string, error: unknown): void {
+    const authorizationError = error as { name?: string; message?: string; status?: number; payload?: unknown };
+    console.warn("[SolidConnectorService] UMA authorization error details", {
+      target,
+      method,
+      name: authorizationError?.name || null,
+      message: authorizationError?.message || null,
+      status: authorizationError?.status || null,
+      payload: authorizationError?.payload || null,
+      cachedAccessRequestUrl: this.umaAccessRequestUrlByTarget.get(target) || null,
+      lastUmaAccessRequestUrl: this.lastUmaAccessRequestUrl
+    });
   }
 
   private getSupportedExtension(fileName: string): "fit" | "gpx" | null {
@@ -618,7 +808,7 @@ export class SolidConnectorService extends ConnectorService {
     return null;
   }
 
-  private async getRawActivityBuffer(rawActivityPath: string): Promise<ArrayBuffer> {
+  private async getRawActivityBuffer(rawActivityPath: string): Promise<ArrayBuffer | null> {
     const cached = this.rawActivityCache.get(rawActivityPath);
     if (cached) {
       this.rawActivityCache.delete(rawActivityPath);
@@ -631,8 +821,28 @@ export class SolidConnectorService extends ConnectorService {
     }
 
     const fetchStartedAt = Date.now();
-    const response = await this.fetchWithAccessTokenFirst(rawActivityPath);
+    let response: Response;
+    try {
+      response = await this.fetchWithAccessTokenFirst(rawActivityPath);
+    } catch (error) {
+      if (this.isUmaAuthorizationError(error)) {
+        console.warn("[SolidStreamsTiming] raw Solid activity is still inaccessible after UMA access request", {
+          rawActivityPath,
+          error
+        });
+        return null;
+      }
+      throw error;
+    }
     if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        console.warn("[SolidStreamsTiming] raw Solid activity is inaccessible, skipping stream compute", {
+          rawActivityPath,
+          status: response.status,
+          statusText: response.statusText
+        });
+        return null;
+      }
       throw new Error(
         `Failed to fetch raw Solid activity ${rawActivityPath}: ${response.status} ${response.statusText}`
       );
@@ -666,18 +876,125 @@ export class SolidConnectorService extends ConnectorService {
 
   private syncConnectorInfoWithCurrentAuthSession(): SolidConnectorInfo {
     const solidConnectorInfo = this.solidConnectorInfoService.fetch();
-    const updatedConnectorInfo = new SolidConnectorInfo(
-      this.auth.webId || solidConnectorInfo.webId,
-      solidConnectorInfo.issuer,
-      solidConnectorInfo.clientId,
-      this.buildCurrentAuthSession(solidConnectorInfo),
-      solidConnectorInfo.dataWebId || this.auth.webId || solidConnectorInfo.webId,
-      solidConnectorInfo.aggregatorBaseUrl,
-      solidConnectorInfo.aggregatorUrl,
-      solidConnectorInfo.followingAthleteWebIds,
-      solidConnectorInfo.selectedAthleteWebIds
+    const updatedConnectorInfo = this.selectLoggedInAthlete(
+      new SolidConnectorInfo(
+        this.auth.webId || solidConnectorInfo.webId,
+        solidConnectorInfo.issuer,
+        solidConnectorInfo.clientId,
+        this.buildCurrentAuthSession(solidConnectorInfo),
+        null,
+        solidConnectorInfo.aggregatorBaseUrl,
+        solidConnectorInfo.aggregatorUrl,
+        solidConnectorInfo.followingAthleteWebIds,
+        solidConnectorInfo.selectedAthleteWebIds
+      ),
+      false
     );
-    return this.solidConnectorInfoService.save(updatedConnectorInfo);
+    return updatedConnectorInfo;
+  }
+
+  private selectLoggedInAthlete(
+    solidConnectorInfo: SolidConnectorInfo,
+    forceSelection: boolean = true
+  ): SolidConnectorInfo {
+    const webId = this.auth.webId || solidConnectorInfo.authSession?.webId || solidConnectorInfo.webId;
+    const followingAthleteWebIds = webId
+      ? SolidConnectorInfo.normalizeWebIds([...solidConnectorInfo.followingAthleteWebIds, webId])
+      : solidConnectorInfo.followingAthleteWebIds;
+    const selectedAthleteWebIds =
+      forceSelection || solidConnectorInfo.selectedAthleteWebIds.length === 0
+        ? webId
+          ? [webId]
+          : []
+        : solidConnectorInfo.selectedAthleteWebIds;
+
+    return this.solidConnectorInfoService.save(
+      new SolidConnectorInfo(
+        webId || solidConnectorInfo.webId,
+        solidConnectorInfo.issuer,
+        solidConnectorInfo.clientId,
+        solidConnectorInfo.authSession,
+        null,
+        solidConnectorInfo.aggregatorBaseUrl,
+        solidConnectorInfo.aggregatorUrl,
+        followingAthleteWebIds,
+        selectedAthleteWebIds
+      )
+    );
+  }
+
+  private async restoreConnectorPreferencesFromPod(): Promise<SolidConnectorInfo | null> {
+    const current = this.solidConnectorInfoService.fetch();
+    const loggedInBase = this.getLoggedInBase();
+    if (!loggedInBase) {
+      return null;
+    }
+
+    const settingsIri = `${loggedInBase}/settings/elevate-user.ttl`;
+    const response = await this.fetchWithAccessTokenFirst(settingsIri, { headers: { Accept: "text/turtle" } });
+    if (response.status === 404) {
+      return null;
+    }
+    if (!response.ok) {
+      throw new Error(`Failed to read Solid user settings ${settingsIri}: ${response.status} ${response.statusText}`);
+    }
+
+    const preferences = await this.parseConnectorPreferencesFromUserSettings(await response.text(), settingsIri);
+    const webId = this.auth.webId || current.webId;
+    const followingAthleteWebIds = SolidConnectorInfo.normalizeWebIds([
+      ...current.followingAthleteWebIds,
+      ...preferences.followingAthleteWebIds,
+      ...(webId ? [webId] : [])
+    ]);
+
+    return this.solidConnectorInfoService.save(
+      new SolidConnectorInfo(
+        webId,
+        current.issuer,
+        current.clientId,
+        current.authSession,
+        null,
+        current.aggregatorBaseUrl,
+        preferences.aggregatorUrl,
+        followingAthleteWebIds,
+        webId ? [webId] : []
+      )
+    );
+  }
+
+  private parseConnectorPreferencesFromUserSettings(
+    turtle: string,
+    settingsIri: string
+  ): Promise<{ followingAthleteWebIds: string[]; aggregatorUrl: string | null }> {
+    const store = new Store();
+    const parser = new Parser({ baseIRI: settingsIri, format: "text/turtle" });
+
+    return new Promise((resolve, reject) => {
+      parser.parse(turtle, (error, quad) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        if (quad) {
+          store.addQuad(quad);
+          return;
+        }
+
+        const userSettingsNode = DataFactory.namedNode(new URL("#user-settings", settingsIri).toString());
+        const settingsPrefix = "https://solidlabresearch.github.io/elevate/settings#";
+        const followingAthleteWebIds = store
+          .getQuads(userSettingsNode, DataFactory.namedNode(`${settingsPrefix}followingAthleteWebId`), null, null)
+          .map(quad => quad.object.value);
+        const aggregatorUrl =
+          store.getQuads(userSettingsNode, DataFactory.namedNode(`${settingsPrefix}aggregatorUrl`), null, null)[0]
+            ?.object.value || null;
+
+        resolve({
+          followingAthleteWebIds: SolidConnectorInfo.normalizeWebIds(followingAthleteWebIds),
+          aggregatorUrl: aggregatorUrl?.trim() || null
+        });
+      });
+    });
   }
 
   private buildCurrentAuthSession(solidConnectorInfo: SolidConnectorInfo): SolidAuthSession | null {
@@ -730,6 +1047,7 @@ export class SolidConnectorService extends ConnectorService {
     solidConnectorInfo: SolidConnectorInfo
   ): Promise<{ authorizationUrl: string; redirectUri: string }> {
     const base = solidConnectorInfo.base;
+    const loggedInBase = this.getLoggedInBase() || base;
     const authorizationServer = await this.discoverAggregatorAuthorizationServer(solidConnectorInfo);
     const authorizationHeader = solidConnectorInfo.authSession?.accessToken
       ? { Authorization: `Bearer ${solidConnectorInfo.authSession.accessToken}` }
@@ -748,7 +1066,7 @@ export class SolidConnectorService extends ConnectorService {
         source_container: `${base}/raw-activities/`,
         output_container: `${base}/activities/`,
         athlete_settings: `${base}/settings/elevate-athlete.ttl`,
-        user_settings: `${base}/settings/elevate-user.ttl`,
+        user_settings: `${loggedInBase}/settings/elevate-user.ttl`,
         return_url: this.getAggregatorReturnUrl()
       })
     });
@@ -875,6 +1193,9 @@ export class SolidConnectorService extends ConnectorService {
   }
 
   private parseUmaAuthorizationServer(header: string | null): string | null {
+    console.info("[SolidConnectorService] Parsing UMA authorization server", {
+      wwwAuthenticate: header
+    });
     if (!header) {
       return null;
     }
@@ -884,13 +1205,66 @@ export class SolidConnectorService extends ConnectorService {
       return null;
     }
 
-    const match = /as_uri=("[^"]*"|[^\s,]+)/u.exec(header.slice(umaIndex));
+    const match = /(as_uri|authorization_uri|issuer)=("[^"]*"|[^\s,]+)/u.exec(header.slice(umaIndex));
     if (!match) {
       return null;
     }
 
-    const rawValue = match[1];
+    const rawValue = match[2];
     return rawValue.startsWith('"') ? rawValue.slice(1, -1) : rawValue;
+  }
+
+  private rememberUmaAccessRequestUrl(target: string, response: Response): void {
+    const wwwAuthenticate = response.headers.get("WWW-Authenticate");
+    const authorizationServer = this.parseUmaAuthorizationServer(wwwAuthenticate);
+    const accessRequestUrl = UmaAccessRequest.accessRequestUrlFromAuthorizationServer(authorizationServer);
+    console.info("[SolidConnectorService] Parsed UMA challenge for access request URL", {
+      target,
+      status: response.status,
+      wwwAuthenticate,
+      authorizationServer,
+      accessRequestUrl
+    });
+    if (accessRequestUrl) {
+      this.umaAccessRequestUrlByTarget.set(target, accessRequestUrl);
+      this.lastUmaAccessRequestUrl = accessRequestUrl;
+    } else {
+      console.warn("[SolidConnectorService] Could not derive UMA access request URL", {
+        target,
+        authorizationServer
+      });
+    }
+  }
+
+  private async discoverUmaAccessRequestUrlForTarget(target: string): Promise<string | null> {
+    try {
+      const probeResponse = await fetch(target, {
+        method: "GET",
+        headers: { Accept: "text/turtle, application/ld+json;q=0.8" }
+      });
+      const wwwAuthenticate = probeResponse.headers.get("WWW-Authenticate");
+      const authorizationServer = this.parseUmaAuthorizationServer(wwwAuthenticate);
+      const accessRequestUrl = UmaAccessRequest.accessRequestUrlFromAuthorizationServer(authorizationServer);
+      console.info("[SolidConnectorService] Probed target for UMA access request URL", {
+        target,
+        status: probeResponse.status,
+        statusText: probeResponse.statusText,
+        wwwAuthenticate,
+        authorizationServer,
+        accessRequestUrl
+      });
+      if (accessRequestUrl) {
+        this.umaAccessRequestUrlByTarget.set(target, accessRequestUrl);
+        this.lastUmaAccessRequestUrl = accessRequestUrl;
+      }
+      return accessRequestUrl;
+    } catch (error) {
+      console.warn("[SolidConnectorService] Unable to probe target for UMA access request URL", {
+        target,
+        error
+      });
+      return null;
+    }
   }
 
   private async desktopAggregatorLogin(authorizationUrl: string): Promise<SolidAggregatorAuthResult> {
@@ -949,7 +1323,7 @@ export class SolidConnectorService extends ConnectorService {
         current.issuer,
         current.clientId,
         current.authSession,
-        current.dataWebId,
+        null,
         aggregatorBaseUrl,
         aggregatorUrl,
         current.followingAthleteWebIds,
@@ -1024,6 +1398,14 @@ ${settings
     const settings = userSettings || UserSettings.DesktopUserSettings.DEFAULT_MODEL;
     const zones = settings.zones || UserZonesModel.DEFAULT_MODEL;
     const zoneKeys = Object.keys(UserZonesModel.DEFAULT_MODEL);
+    const connectorInfo = this.solidConnectorInfoService.fetch();
+    const connectorPreferenceTriples = [
+      ...connectorInfo.followingAthleteWebIds.map(webId => `elset:followingAthleteWebId ${this.ttlLiteral(webId)}`),
+      connectorInfo.aggregatorUrl ? `elset:aggregatorUrl ${this.ttlLiteral(connectorInfo.aggregatorUrl)}` : null
+    ].filter(Boolean);
+    const connectorPreferenceText = connectorPreferenceTriples.length
+      ? `${connectorPreferenceTriples.join(" ;\n  ")} ;\n  `
+      : "";
 
     return (
       this.settingsPrefixes() +
@@ -1043,6 +1425,7 @@ ${settings
     !!settings.disableActivitiesNeedRecalculationWarning,
     "xsd:boolean"
   )} ;
+  ${connectorPreferenceText}
   ${zoneKeys.map(key => `elset:zoneSet ${this.serializeZoneSet(key, zones[key])}`).join(" ;\n  ")} .
 `
     );

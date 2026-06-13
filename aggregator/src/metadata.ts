@@ -100,7 +100,7 @@ export function transformationCatalogTurtle(instance?: AggregatorInstance): stri
   fno:type dcat:Dataset ;
   fno:predicate <${TRANS}activityRdf> ;
   dct:format <http://www.w3.org/ns/formats/Turtle> ;
-  dct:conformsTo <https://solidlabresearch.github.io/activity-ontology#> .
+  dct:conformsTo <https://w3id.org/activity-ontology#> .
 `
   );
 }

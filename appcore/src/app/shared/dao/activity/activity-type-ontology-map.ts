@@ -1,6 +1,6 @@
 import { ElevateSport } from "@elevate/shared/enums/elevate-sport.enum";
 
-export const ACTIVO_NS = "https://solidlabresearch.github.io/activity-ontology#";
+export const ACTIVO_NS = "https://w3id.org/activity-ontology#";
 export const MEDTOP_NS = "http://cv.iptc.org/newscodes/mediatopic/";
 export const OAACTIVITY_NS = "https://openactive.io/activity-list#";
 

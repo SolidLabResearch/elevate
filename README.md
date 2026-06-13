@@ -88,7 +88,7 @@ Start the Solid server and auth server:
 ```bash
 cd ..
 git clone https://github.com/maartyman/user-managed-access
-cd user-managed-access
+cd user-managed-access #original-uma
 npm install
 npm run start
 ```
@@ -133,26 +133,26 @@ npm run launch:dev:app
 npm test
 ```
 
-- Generate production installers and publish them per platforms:
+- Generate production installers per platform:
 
 First switch to desktop directory with `cd desktop/`
 
 - Build `Windows` `x64` `.exe`:
 
   ```bash
-  npm run build:publish:windows
+  npm run build:package:win
   ```
 
 - Build `Linux` `x64` `.deb`:
 
   ```bash
-  npm run build:publish:linux
+  npm run build:package:linux
   ```
 
 - Build `MacOS` `x64` `.dmg` :
 
   ```bash
-  npm run build:publish:macos
+  npm run build:package:mac
   ```
 
 > Output installers will be located in `./desktop/package/`

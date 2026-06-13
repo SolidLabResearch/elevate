@@ -17,8 +17,9 @@ export class SolidConnectorInfoService {
       const migratedFollowingAthleteWebIds = migratedDataWebId
         ? SolidConnectorInfo.normalizeWebIds([...followingAthleteWebIds, migratedDataWebId])
         : followingAthleteWebIds;
-      const migratedSelectedAthleteWebIds = selectedAthleteWebIds
-        ? SolidConnectorInfo.normalizeWebIds(selectedAthleteWebIds)
+      const normalizedSelectedAthleteWebIds = SolidConnectorInfo.normalizeWebIds(selectedAthleteWebIds || []);
+      const migratedSelectedAthleteWebIds = normalizedSelectedAthleteWebIds.length
+        ? normalizedSelectedAthleteWebIds
         : migratedDataWebId
         ? [migratedDataWebId]
         : [];
@@ -55,5 +56,22 @@ export class SolidConnectorInfoService {
 
   public hasMultipleSelectedAthletes(): boolean {
     return this.selectedAthleteWebIds().length > 1;
+  }
+
+  public resetLoggedOutState(): SolidConnectorInfo {
+    const current = this.fetch();
+    return this.save(
+      new SolidConnectorInfo(
+        null,
+        current.issuer,
+        current.clientId,
+        null,
+        null,
+        current.aggregatorBaseUrl,
+        null,
+        current.followingAthleteWebIds,
+        []
+      )
+    );
   }
 }

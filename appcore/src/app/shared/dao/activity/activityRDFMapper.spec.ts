@@ -258,7 +258,7 @@ describe("ActivityMapping round-trip", () => {
     const ttl = new ActivityRDFMapper().write("http://example.org/test-activity", act);
 
     expect(ttl).toContain(
-      "<http://example.org/test-activity#activity> activo:activityType <https://solidlabresearch.github.io/activity-ontology#Run> ."
+      "<http://example.org/test-activity#activity> activo:activityType <https://w3id.org/activity-ontology#Run> ."
     );
     expect(ttl).not.toContain("<http://example.org/test-activity#activity> a activo:Run .");
     expect(ttl).not.toContain("rdfs:subClassOf activo:Activity");

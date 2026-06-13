@@ -31,6 +31,7 @@ export class SolidConnectorComponent extends ConnectorsComponent implements OnIn
   public isUploadingActivities: boolean;
   public historyChangesSub: Subscription;
   public followingAthleteWebId: string;
+  public selectedAthleteWebId: string | null;
 
   constructor(
     @Inject(AppService) public readonly appService: AppService,
@@ -53,11 +54,13 @@ export class SolidConnectorComponent extends ConnectorsComponent implements OnIn
     this.isHandlingAuthFlow = false;
     this.isUploadingActivities = false;
     this.followingAthleteWebId = "";
+    this.selectedAthleteWebId = null;
   }
 
   public ngOnInit(): void {
     this.updateSyncDateTimeText();
     this.solidConnectorInfo = this.solidConnectorInfoService.fetch();
+    this.selectedAthleteWebId = this.solidConnectorInfo.selectedAthleteWebIds[0] || null;
     this.handleAggregatorReturn().catch(err => {
       this.logger.error("Error while handling Solid aggregator return:", err);
       this.snackBar.open(err?.message || "Unable to complete aggregator login.", "Ok", { duration: 5000 });
@@ -75,11 +78,6 @@ export class SolidConnectorComponent extends ConnectorsComponent implements OnIn
     });
   }
 
-  public onDataWebIdChange(): void {
-    this.ensureFollowingAthlete(this.solidConnectorInfo.dataWebId, true);
-    this.saveChanges();
-  }
-
   public onAggregatorConfigChange(): void {
     this.solidConnectorInfo = this.solidConnectorInfoService.save(
       new SolidConnectorInfo(
@@ -87,7 +85,7 @@ export class SolidConnectorComponent extends ConnectorsComponent implements OnIn
         this.solidConnectorInfo.issuer,
         this.solidConnectorInfo.clientId,
         this.solidConnectorInfo.authSession,
-        this.solidConnectorInfo.dataWebId,
+        null,
         this.solidConnectorInfo.aggregatorBaseUrl,
         null,
         this.solidConnectorInfo.followingAthleteWebIds,
@@ -108,8 +106,8 @@ export class SolidConnectorComponent extends ConnectorsComponent implements OnIn
       .then(async () => {
         this.solidConnectorInfo = this.solidConnectorInfoService.fetch();
         await this.refreshLoginState();
-        this.ensureFollowingAthlete(this.solidConnectorInfo.dataWebId || this.solidConnectorInfo.webId, true);
-        if (this.solidConnectorInfo.dataWebId) {
+        this.ensureFollowingAthlete(this.solidConnectorInfo.webId, true);
+        if (this.selectedAthleteWebId) {
           this.saveChanges();
         }
         this.snackBar.open("Solid login successful.", "Ok", { duration: 2000 });
@@ -132,6 +130,7 @@ export class SolidConnectorComponent extends ConnectorsComponent implements OnIn
       .logout()
       .then(solidConnectorInfo => {
         this.solidConnectorInfo = solidConnectorInfo;
+        this.selectedAthleteWebId = null;
         this.isLoggedIn = false;
         this.solidConnectorService.stop().catch(err => {
           this.logger.error("Error stopping Solid sync after logout:", err);
@@ -147,7 +146,9 @@ export class SolidConnectorComponent extends ConnectorsComponent implements OnIn
   }
 
   public saveChanges(): void {
+    this.solidConnectorInfo.selectedAthleteWebIds = this.selectedAthleteWebId ? [this.selectedAthleteWebId] : [];
     this.solidConnectorInfo = this.solidConnectorInfoService.save(this.solidConnectorInfo);
+    this.selectedAthleteWebId = this.solidConnectorInfo.selectedAthleteWebIds[0] || null;
     this.solidConnectorService.refreshActivitySelection();
     this.solidConnectorService
       .stop()
@@ -162,7 +163,7 @@ export class SolidConnectorComponent extends ConnectorsComponent implements OnIn
   }
 
   public addFollowingAthlete(): void {
-    this.ensureFollowingAthlete(this.followingAthleteWebId, true);
+    this.ensureFollowingAthlete(this.followingAthleteWebId, false);
     this.followingAthleteWebId = "";
     this.saveChanges();
   }
@@ -179,10 +180,12 @@ export class SolidConnectorComponent extends ConnectorsComponent implements OnIn
     this.solidConnectorInfo.selectedAthleteWebIds = this.solidConnectorInfo.selectedAthleteWebIds.filter(
       athleteWebId => athleteWebId !== webId
     );
+    this.selectedAthleteWebId = this.solidConnectorInfo.selectedAthleteWebIds[0] || null;
     this.saveChanges();
   }
 
   public onSelectedAthletesChange(): void {
+    this.solidConnectorInfo.selectedAthleteWebIds = this.selectedAthleteWebId ? [this.selectedAthleteWebId] : [];
     this.saveChanges();
   }
 
@@ -197,11 +200,9 @@ export class SolidConnectorComponent extends ConnectorsComponent implements OnIn
         normalizedWebId
       ];
     }
-    if (select && !this.solidConnectorInfo.selectedAthleteWebIds.includes(normalizedWebId)) {
-      this.solidConnectorInfo.selectedAthleteWebIds = [
-        ...this.solidConnectorInfo.selectedAthleteWebIds,
-        normalizedWebId
-      ];
+    if (select) {
+      this.selectedAthleteWebId = normalizedWebId;
+      this.solidConnectorInfo.selectedAthleteWebIds = [normalizedWebId];
     }
   }
 
@@ -282,16 +283,16 @@ export class SolidConnectorComponent extends ConnectorsComponent implements OnIn
             this.solidConnectorInfo.issuer,
             this.solidConnectorInfo.clientId,
             this.solidConnectorInfo.authSession,
-            this.solidConnectorInfo.dataWebId || this.solidConnectorService.getWebId() || this.solidConnectorInfo.webId,
+            null,
             this.solidConnectorInfo.aggregatorBaseUrl,
             this.solidConnectorInfo.aggregatorUrl,
             this.solidConnectorInfo.followingAthleteWebIds,
             this.solidConnectorInfo.selectedAthleteWebIds
           )
         );
-        this.ensureFollowingAthlete(this.solidConnectorInfo.dataWebId, true);
+        this.ensureFollowingAthlete(this.solidConnectorInfo.webId || this.solidConnectorService.getWebId(), true);
         this.snackBar.open("Solid login successful.", "Ok", { duration: 2000 });
-        if (this.solidConnectorInfo.dataWebId) {
+        if (this.selectedAthleteWebId) {
           this.saveChanges();
         }
       }
@@ -317,13 +318,14 @@ export class SolidConnectorComponent extends ConnectorsComponent implements OnIn
         this.solidConnectorInfo.issuer,
         this.solidConnectorInfo.clientId,
         this.solidConnectorInfo.authSession,
-        this.solidConnectorInfo.dataWebId,
+        null,
         this.solidConnectorInfo.aggregatorBaseUrl,
         aggregatorUrl,
         this.solidConnectorInfo.followingAthleteWebIds,
         this.solidConnectorInfo.selectedAthleteWebIds
       )
     );
+    await this.solidConnectorService.writeConnectorPreferencesToPod();
     url.searchParams.delete("aggregator");
     url.searchParams.delete("aggregator_status");
     window.history.replaceState({}, document.title, url.toString());
@@ -335,6 +337,11 @@ export class SolidConnectorComponent extends ConnectorsComponent implements OnIn
       .then(isLoggedIn => {
         this.isLoggedIn = isLoggedIn;
         this.solidConnectorInfo = this.solidConnectorInfoService.fetch();
+        if (!isLoggedIn) {
+          this.solidConnectorInfo = this.solidConnectorInfoService.resetLoggedOutState();
+          this.selectedAthleteWebId = null;
+          return;
+        }
         const webIdFromToken = this.solidConnectorService.getWebId();
         if (webIdFromToken && webIdFromToken !== this.solidConnectorInfo.webId) {
           this.solidConnectorInfo = this.solidConnectorInfoService.save(
@@ -343,15 +350,17 @@ export class SolidConnectorComponent extends ConnectorsComponent implements OnIn
               this.solidConnectorInfo.issuer,
               this.solidConnectorInfo.clientId,
               this.solidConnectorInfo.authSession,
-              this.solidConnectorInfo.dataWebId || webIdFromToken,
+              null,
               this.solidConnectorInfo.aggregatorBaseUrl,
               this.solidConnectorInfo.aggregatorUrl,
               this.solidConnectorInfo.followingAthleteWebIds,
               this.solidConnectorInfo.selectedAthleteWebIds
             )
           );
-          this.ensureFollowingAthlete(webIdFromToken, false);
         }
+        this.ensureFollowingAthlete(webIdFromToken, this.solidConnectorInfo.selectedAthleteWebIds.length === 0);
+        this.solidConnectorInfo = this.solidConnectorInfoService.save(this.solidConnectorInfo);
+        this.selectedAthleteWebId = this.solidConnectorInfo.selectedAthleteWebIds[0] || null;
       })
       .catch(err => {
         this.logger.error("Error while checking Solid auth state:", err);

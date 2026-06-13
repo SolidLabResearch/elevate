@@ -79,7 +79,7 @@ export type ActivityQueryOptions = {
 };
 
 export class ActivityRDFMapper {
-  private static readonly ACTIVITY_ONTOLOGY_IRI = "https://solidlabresearch.github.io/activity-ontology/";
+  private static readonly ACTIVITY_ONTOLOGY_IRI = "https://w3id.org/activity-ontology/";
   private static oxigraphReady: Promise<void> | null = null;
   private readonly authFetch?: typeof globalThis.fetch;
 
@@ -144,6 +144,10 @@ export class ActivityRDFMapper {
         console.info(`[ActivityRDFMapper] RDF source ${source} does not exist yet. Treating it as empty.`);
         return;
       }
+      if ((response.status === 401 || response.status === 403) && this.isActivityMetadataSource(source)) {
+        console.warn(`[ActivityRDFMapper] RDF activity source ${source} is inaccessible. Treating it as empty.`);
+        return;
+      }
       throw new Error(`Failed to load RDF source ${source}: ${response.status} ${response.statusText}`);
     }
 
@@ -161,6 +165,15 @@ export class ActivityRDFMapper {
       return containerName === "activities" || containerName === "raw-activities";
     } catch (_error) {
       return source.endsWith("/activities/") || source.endsWith("/raw-activities/");
+    }
+  }
+
+  private isActivityMetadataSource(source: string): boolean {
+    try {
+      const url = new URL(source);
+      return url.pathname.includes("/activities/") && url.pathname.endsWith(".ttl");
+    } catch (_error) {
+      return source.includes("/activities/") && source.endsWith(".ttl");
     }
   }
 
@@ -269,7 +282,7 @@ export class ActivityRDFMapper {
     let query = `
 PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 PREFIX prov: <http://www.w3.org/ns/prov#>
-PREFIX activo: <https://solidlabresearch.github.io/activity-ontology#>
+PREFIX activo: <https://w3id.org/activity-ontology#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
 `;
@@ -664,7 +677,7 @@ PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
     const bindingsResults = this.queryBindings(
       store,
       `
-PREFIX activo: <https://solidlabresearch.github.io/activity-ontology#>
+PREFIX activo: <https://w3id.org/activity-ontology#>
 SELECT
 ?lapIndex
 ?lapStart
@@ -761,7 +774,7 @@ ORDER BY ?lapIndex
     const bindingsResults = this.queryBindings(
       store,
       `
-PREFIX activo: <https://solidlabresearch.github.io/activity-ontology#>
+PREFIX activo: <https://w3id.org/activity-ontology#>
 SELECT ?index WHERE {
   <${activityId}> activo:hasFlag ?flag .
 
@@ -794,7 +807,7 @@ SELECT ?index WHERE {
     const bindingsResults = this.queryBindings(
       store,
       `
-PREFIX activo: <https://solidlabresearch.github.io/activity-ontology#>
+PREFIX activo: <https://w3id.org/activity-ontology#>
 SELECT * WHERE {
   <${statId}> activo:hasPeak ?peak .
   ?peak activo:peakStart ?peakStart .
@@ -819,7 +832,7 @@ ORDER BY ?peakDuration
     const bindingsResults = this.queryBindings(
       store,
       `
-PREFIX activo: <https://solidlabresearch.github.io/activity-ontology#>
+PREFIX activo: <https://w3id.org/activity-ontology#>
 SELECT * WHERE {
   <${statId}> activo:hasZone ?zone .
   ?zone activo:zoneStart ?zoneStart .
@@ -857,7 +870,7 @@ SELECT * WHERE {
     const bindingsResults = this.queryBindings(
       store,
       `
-PREFIX activo: <https://solidlabresearch.github.io/activity-ontology#>
+PREFIX activo: <https://w3id.org/activity-ontology#>
 SELECT ?zoneStart ?zoneIndex ?time ?percent ?to WHERE {
   # Calculate total time for percentage
   {
@@ -950,7 +963,7 @@ ORDER BY ?zoneIndex
     ttl += `PREFIX skos: <http://www.w3.org/2004/02/skos/core#>\n`;
     ttl += `PREFIX medtop: <${MEDTOP_NS}>\n`;
     ttl += `PREFIX oaactivity: <${OAACTIVITY_NS}>\n`;
-    ttl += `PREFIX activo: <https://solidlabresearch.github.io/activity-ontology#>\n\n`;
+    ttl += `PREFIX activo: <https://w3id.org/activity-ontology#>\n\n`;
 
     addLink(activityIri, "a", "activo:Activity");
     const activityType = (activity as any).type;

@@ -47,14 +47,14 @@ export class SolidConnectorInfo extends ConnectorInfo {
     this.aggregatorBaseUrl = aggregatorBaseUrl || SolidConnectorInfo.DEFAULT_AGGREGATOR_BASE_URL;
     this.aggregatorUrl = aggregatorUrl;
     this.followingAthleteWebIds = SolidConnectorInfo.normalizeWebIds(followingAthleteWebIds);
-    this.selectedAthleteWebIds = SolidConnectorInfo.normalizeWebIds(selectedAthleteWebIds).filter(webId =>
-      this.followingAthleteWebIds.includes(webId)
-    );
-    this.base = dataWebId || webId ? SolidConnectorInfo.webIdToBase(dataWebId || webId) : "";
+    this.selectedAthleteWebIds = SolidConnectorInfo.normalizeWebIds(selectedAthleteWebIds)
+      .filter(webId => this.followingAthleteWebIds.includes(webId))
+      .slice(0, 1);
+    this.base = this.primaryDataWebId ? SolidConnectorInfo.webIdToBase(this.primaryDataWebId) : "";
   }
 
   public get primaryDataWebId(): string | null {
-    return this.selectedAthleteWebIds[0] || this.dataWebId || this.webId || null;
+    return this.selectedAthleteWebIds[0] || null;
   }
 
   public get selectedBases(): string[] {

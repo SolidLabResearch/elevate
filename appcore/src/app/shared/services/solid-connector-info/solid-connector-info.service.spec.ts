@@ -29,7 +29,7 @@ describe("SolidConnectorInfoService", () => {
     expect(service).toBeTruthy();
   });
 
-  it("should migrate legacy webId to dataWebId", () => {
+  it("should migrate legacy webId to selected athlete", () => {
     localStorage.setItem(
       "SOLID_CONNECTOR_INFO",
       JSON.stringify({
@@ -44,11 +44,11 @@ describe("SolidConnectorInfoService", () => {
     const connectorInfo = service.fetch();
 
     expect(connectorInfo.webId).toBe("https://login-user.example/profile/card#me");
-    expect(connectorInfo.dataWebId).toBe("https://login-user.example/profile/card#me");
+    expect(connectorInfo.selectedAthleteWebIds).toEqual(["https://login-user.example/profile/card#me"]);
     expect(connectorInfo.base).toBe("https://login-user.example");
   });
 
-  it("should preserve separate auth and data webIds", () => {
+  it("should migrate legacy data webId to selected athlete", () => {
     const service: SolidConnectorInfoService = TestBed.inject(SolidConnectorInfoService);
 
     service.save(
@@ -64,7 +64,49 @@ describe("SolidConnectorInfoService", () => {
     const connectorInfo = service.fetch();
 
     expect(connectorInfo.webId).toBe("https://login-user.example/profile/card#me");
-    expect(connectorInfo.dataWebId).toBe("https://data-user.example/profile/card#me");
+    expect(connectorInfo.selectedAthleteWebIds).toEqual(["https://data-user.example/profile/card#me"]);
     expect(connectorInfo.base).toBe("https://data-user.example");
+  });
+
+  it("should keep only one selected athlete", () => {
+    const connectorInfo = new SolidConnectorInfo(
+      "https://login-user.example/profile/card#me",
+      "https://broker.pod.example",
+      SolidConnectorInfo.DEFAULT_CLIENT_ID_URL,
+      null,
+      null,
+      SolidConnectorInfo.DEFAULT_AGGREGATOR_BASE_URL,
+      null,
+      ["https://athlete-one.example/profile/card#me", "https://athlete-two.example/profile/card#me"],
+      ["https://athlete-one.example/profile/card#me", "https://athlete-two.example/profile/card#me"]
+    );
+
+    expect(connectorInfo.selectedAthleteWebIds).toEqual(["https://athlete-one.example/profile/card#me"]);
+    expect(connectorInfo.base).toBe("https://athlete-one.example");
+  });
+
+  it("should reset logged-out transient fields", () => {
+    const service: SolidConnectorInfoService = TestBed.inject(SolidConnectorInfoService);
+
+    service.save(
+      new SolidConnectorInfo(
+        "https://login-user.example/profile/card#me",
+        "https://broker.pod.example",
+        SolidConnectorInfo.DEFAULT_CLIENT_ID_URL,
+        null,
+        null,
+        SolidConnectorInfo.DEFAULT_AGGREGATOR_BASE_URL,
+        "http://localhost:4050/aggregators/example/",
+        ["https://login-user.example/profile/card#me"],
+        ["https://login-user.example/profile/card#me"]
+      )
+    );
+
+    const connectorInfo = service.resetLoggedOutState();
+
+    expect(connectorInfo.webId).toBeNull();
+    expect(connectorInfo.aggregatorUrl).toBeNull();
+    expect(connectorInfo.selectedAthleteWebIds).toEqual([]);
+    expect(connectorInfo.followingAthleteWebIds).toEqual(["https://login-user.example/profile/card#me"]);
   });
 });

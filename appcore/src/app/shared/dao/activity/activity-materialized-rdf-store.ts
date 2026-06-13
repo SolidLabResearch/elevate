@@ -90,7 +90,17 @@ export class ActivityMaterializedRdfStore {
   }
 
   private async loadSource(store: OxigraphStore, source: string): Promise<void> {
-    const quads = await this.fetchSourceQuads(source);
+    let quads: Quad[] | null;
+    try {
+      quads = await this.fetchSourceQuads(source);
+    } catch (error) {
+      if (this.isActivityMetadataSource(source)) {
+        console.warn("[ActivityMaterializedRdfStore] activity source is inaccessible, skipping", { source, error });
+        this.sourceQuads.delete(source);
+        return;
+      }
+      throw error;
+    }
     if (!quads) {
       this.sourceQuads.delete(source);
       return;
@@ -141,12 +151,29 @@ export class ActivityMaterializedRdfStore {
       console.info("[ActivityMaterializedRdfStore] source does not exist, skipping", { source });
       return null;
     }
+    if ((response.status === 401 || response.status === 403) && this.isActivityMetadataSource(source)) {
+      console.warn("[ActivityMaterializedRdfStore] activity source is unauthorized, skipping", {
+        source,
+        status: response.status,
+        statusText: response.statusText
+      });
+      return null;
+    }
     if (!response.ok) {
       throw new Error(`Failed to load materialized RDF source ${source}: ${response.status} ${response.statusText}`);
     }
 
     const body = await response.text();
     return this.parseRdf(body, source, response.headers.get("content-type"));
+  }
+
+  private isActivityMetadataSource(source: string): boolean {
+    try {
+      const url = new URL(source);
+      return url.pathname.includes("/activities/") && url.pathname.endsWith(".ttl");
+    } catch (_error) {
+      return source.includes("/activities/") && source.endsWith(".ttl");
+    }
   }
 
   private removeSource(store: OxigraphStore, source: string): void {

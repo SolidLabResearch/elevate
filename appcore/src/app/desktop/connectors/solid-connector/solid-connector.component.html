@@ -7,14 +7,11 @@
     <span *ngIf="isLoggedIn && solidConnectorInfo.webId">Connected&nbsp;➔&nbsp;<i>{{solidConnectorInfo.webId | shorten: 90: '...'}}</i></span>
     <span *ngIf="isLoggedIn && !solidConnectorInfo.webId">Connected.</span>
     <span *ngIf="!isLoggedIn">Not connected. </span>
-    <span *ngIf="solidConnectorInfo.dataWebId">
-      Default&nbsp;data&nbsp;WebID&nbsp;<i>{{solidConnectorInfo.dataWebId | shorten: 90: '...'}}</i>
+    <span *ngIf="selectedAthleteWebId">
+      Selected&nbsp;athlete&nbsp;<i>{{selectedAthleteWebId | shorten: 90: '...'}}</i>
     </span>
-    <span *ngIf="solidConnectorInfo.selectedAthleteWebIds.length">
-      Showing&nbsp;{{solidConnectorInfo.selectedAthleteWebIds.length}}&nbsp;athlete(s)
-    </span>
-    <span *ngIf="!solidConnectorInfo.selectedAthleteWebIds.length">
-      No athletes selected.
+    <span *ngIf="!selectedAthleteWebId">
+      No athlete selected.
     </span>
     <span *ngIf="solidConnectorInfo.aggregatorUrl">
       Aggregator&nbsp;<i>{{solidConnectorInfo.aggregatorUrl | shorten: 90: '...'}}</i>
@@ -41,7 +38,7 @@
       </button>
 
       <button (click)="saveChanges()"
-              [disabled]="appService.isSyncing || isHandlingAuthFlow || !solidConnectorInfo.dataWebId || !solidConnectorInfo.aggregatorBaseUrl"
+              [disabled]="appService.isSyncing || isHandlingAuthFlow || !selectedAthleteWebId || !solidConnectorInfo.aggregatorBaseUrl"
               color="primary"
               mat-stroked-button>
         <mat-icon fontSet="material-icons-outlined">sync</mat-icon>
@@ -49,7 +46,7 @@
       </button>
 
       <button (click)="initializeAggregator()"
-              [disabled]="appService.isSyncing || isHandlingAuthFlow || !isLoggedIn || !solidConnectorInfo.dataWebId || !solidConnectorInfo.issuer || !solidConnectorInfo.aggregatorBaseUrl"
+              [disabled]="appService.isSyncing || isHandlingAuthFlow || !isLoggedIn || !selectedAthleteWebId || !solidConnectorInfo.issuer || !solidConnectorInfo.aggregatorBaseUrl"
               color="primary"
               mat-stroked-button>
         <mat-icon fontSet="material-icons-outlined">hub</mat-icon>
@@ -64,7 +61,7 @@
              type="file">
 
       <button (click)="activityFilePicker.click()"
-              [disabled]="appService.isSyncing || isHandlingAuthFlow || isUploadingActivities || !isLoggedIn || !solidConnectorInfo.dataWebId"
+              [disabled]="appService.isSyncing || isHandlingAuthFlow || isUploadingActivities || !isLoggedIn || !selectedAthleteWebId"
               color="primary"
               mat-stroked-button>
         <mat-icon fontSet="material-icons-outlined">upload_file</mat-icon>
@@ -72,7 +69,7 @@
       </button>
     </div>
 
-    <span *ngIf="!solidConnectorInfo.dataWebId">Not configured. </span>
+    <span *ngIf="!selectedAthleteWebId">Not configured. </span>
     <div class="configureView" fxFill>
       <mat-form-field fxFill>
         <input [(ngModel)]="solidConnectorInfo.issuer"
@@ -81,24 +78,11 @@
                placeholder="Enter your Solid issuer (e.g. https://broker.pod.inrupt.com)"
                type="text">
       </mat-form-field>
-      <div class="mat-caption">
-        Client metadata URL: <i>{{solidConnectorInfo.clientId}}</i>
-      </div>
-      <div class="mat-caption">
-        Redirect URI: <i>{{solidConnectorService.getCurrentRedirectUri()}}</i>
-      </div>
       <mat-form-field fxFill>
         <input [ngModel]="solidConnectorInfo.webId || ''"
                matInput
                placeholder="Logged-in WebID"
                readonly
-               type="text">
-      </mat-form-field>
-      <mat-form-field fxFill>
-        <input [(ngModel)]="solidConnectorInfo.dataWebId"
-               (change)="onDataWebIdChange()"
-               matInput
-               placeholder="Data WebID to sync from"
                type="text">
       </mat-form-field>
       <div fxLayout="row" fxLayoutAlign="start center" fxLayoutGap="8px">
@@ -124,10 +108,9 @@
         </button>
       </div>
       <mat-form-field fxFill>
-        <mat-select [(ngModel)]="solidConnectorInfo.selectedAthleteWebIds"
+        <mat-select [(ngModel)]="selectedAthleteWebId"
                     (selectionChange)="onSelectedAthletesChange()"
-                    multiple
-                    placeholder="Athlete data to show">
+                    placeholder="Selected athlete">
           <mat-option *ngFor="let athleteWebId of solidConnectorInfo.followingAthleteWebIds"
                       [value]="athleteWebId">
             {{athleteWebId}}
