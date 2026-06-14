@@ -2,6 +2,8 @@
 
 This repository demonstrates a dashboard that stores and visualizes sports and activity data in Solid Pods. It shows how decentralized data pods, Incremunica, and aggregators can be combined to build a high-performance dashboard app with rich insights and visualizations.
 
+[![Youtube Video](https://github.com/user-attachments/assets/8bfa318a-ac60-403c-931e-3fba96245243)](https://www.youtube.com/watch?v=edm4x72ftyc)
+
 ## Development
 
 This section covers the environment setup to develop and build both desktop app and web extension.
