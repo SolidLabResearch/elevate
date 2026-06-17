@@ -8,7 +8,7 @@ This repository demonstrates a dashboard that stores and visualizes sports and a
 
 You will need to install [NodeJS](https://nodejs.org) (v20+).
 
-Start the Solid server on localhost:3000 and auth server in another terminal:
+Run the following commands in another terminal:
 ```bash
 git clone --branch elevate-demo https://github.com/maartyman/user-managed-access
 cd user-managed-access
@@ -19,11 +19,11 @@ yarn start
 ```
 This creates the data vault server, IdP server, and authorization server for:
 
-| Name  | WebID                                          | Email             | Password |
-| ----- | ---------------------------------------------- |-------------------| -------- |
-| alice | http://localhost/alice/profile/card#me         | alice@example.org | abc123   |
-| bob   | http://localhost/bob/profile/card#me           | bob@example.org   | abc123   |
-| demo  | http://localhost/demo/profile/card#me          | demo@example.org  | abc123   |
+| Name  | WebID                                       | Email             | Password |
+| ----- |---------------------------------------------|-------------------| -------- |
+| alice | http://localhost:3000/alice/profile/card#me | alice@example.org | abc123   |
+| bob   | http://localhost:3000/bob/profile/card#me        | bob@example.org   | abc123   |
+| demo  | http://localhost:3000/demo/profile/card#me       | demo@example.org  | abc123   |
 
 Start Loama to provide the UI for policies in another terminal:
 ```bash
@@ -34,19 +34,9 @@ npm run dev
 ```
 The Loama policy management client can be opened on http://localhost:5173/.
 
+Now clone this Elevate repository:
 ```bash
 git clone https://github.com/SolidLabResearch/elevate.git
-```
-
-or
-
-```bash
-git clone git@github.com:SolidLabResearch/elevate.git
-```
-
-The new mono-repo including the desktop app is on `develop` branch. So checkout/track this branch to build the desktop app:
-
-```bash
 cd ./elevate
 ```
 
@@ -56,35 +46,33 @@ Then install npm dependencies:
 npm install
 ```
 
-Start the fill pod web UI from the elevate folder to upload some FIT files to your pod in another terminal:
+Start the fill pod web UI from the elevate folder in another terminal:
 ```bash
 cd ./fill-pod-web/
 npm run fill-pod:web
 ```
-The fill pod application can then be opened on http://localhost:4317.
+The fill pod application to upload some FIT files to your data vault can then be opened on http://localhost:4317.
 
-Start the aggregator server from the elevate folder to convert FIT files to RDF and write them back to the pod in another terminal:
+Start the Aggregator server from the elevate folder in another terminal:
 ```bash
 cd ./aggregator/
 npm run build && npm run start
 ```
+This server will convert the FIT files to RDF and write them back to the data vault.
 
 Finally start elevate, all commands bellow will need to be executed in `./desktop/` folder. So:
-
 ```bash
 cd ./desktop/
 ```
 
 Run in development:
-
 ```bash
 npm start
 ```
 
-> This npm task will create a `./desktop/dist` output folder and re-compile both `appcore` and `desktop` projects on any code changes
+> This npm task will create a `./desktop/dist` output folder and re-compile both `appcore` and `desktop` projects on any code changes, but it might take a while before you can start the app.
 
 To open the desktop app, open another terminal, then run:
-
 ```bash
 npm run launch:dev:app
 ```
