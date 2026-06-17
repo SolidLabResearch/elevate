@@ -4,6 +4,91 @@ This repository demonstrates a dashboard that stores and visualizes sports and a
 
 [![Youtube Video](https://github.com/user-attachments/assets/8bfa318a-ac60-403c-931e-3fba96245243)](https://www.youtube.com/watch?v=edm4x72ftyc)
 
+## Run demo
+
+You will need to install [NodeJS](https://nodejs.org) (v20+).
+
+Start the Solid server on localhost:3000 and auth server in another terminal:
+```bash
+git clone --branch elevate-demo https://github.com/maartyman/user-managed-access
+cd user-managed-access
+corepack enable
+yarn install
+yarn build
+yarn start
+```
+This creates the data vault server, IdP server, and authorization server for:
+
+| Name  | WebID                                          | Email             | Password |
+| ----- | ---------------------------------------------- |-------------------| -------- |
+| alice | http://localhost/alice/profile/card#me         | alice@example.org | abc123   |
+| bob   | http://localhost/bob/profile/card#me           | bob@example.org   | abc123   |
+| demo  | http://localhost/demo/profile/card#me          | demo@example.org  | abc123   |
+
+Start Loama to provide the UI for policies in another terminal:
+```bash
+git clone https://github.com/maartyman/loama
+cd loama
+npm install
+npm run dev
+```
+The Loama policy management client can be opened on http://localhost:5173/.
+
+```bash
+git clone https://github.com/SolidLabResearch/elevate.git
+```
+
+or
+
+```bash
+git clone git@github.com:SolidLabResearch/elevate.git
+```
+
+The new mono-repo including the desktop app is on `develop` branch. So checkout/track this branch to build the desktop app:
+
+```bash
+cd ./elevate
+```
+
+Then install npm dependencies:
+
+```bash
+npm install
+```
+
+Start the fill pod web UI from the elevate folder to upload some FIT files to your pod in another terminal:
+```bash
+cd ./fill-pod-web/
+npm run fill-pod:web
+```
+The fill pod application can then be opened on http://localhost:4317.
+
+Start the aggregator server from the elevate folder to convert FIT files to RDF and write them back to the pod in another terminal:
+```bash
+cd ./aggregator/
+npm run build && npm run start
+```
+
+Finally start elevate, all commands bellow will need to be executed in `./desktop/` folder. So:
+
+```bash
+cd ./desktop/
+```
+
+Run in development:
+
+```bash
+npm start
+```
+
+> This npm task will create a `./desktop/dist` output folder and re-compile both `appcore` and `desktop` projects on any code changes
+
+To open the desktop app, open another terminal, then run:
+
+```bash
+npm run launch:dev:app
+```
+
 ## Development
 
 This section covers the environment setup to develop and build both desktop app and web extension.
@@ -37,138 +122,6 @@ The `Desktop` main technology stack is:
 - [Electron-builder](https://www.electron.build/) to build, sign and publish installers per platform. Also handle app updates process (via `electron-updater`).
 - [Rollup.js](https://rollupjs.org/guide/en/) to load & bundle modules.
 - [Vue.js](https://vuejs.org/) for splash-screen update window.
-
-### Environments setup
-
-#### Install requirements
-
-You will need to install [NodeJS](https://nodejs.org) (v15+).
-
-```bash
-git clone https://github.com/SolidLabResearch/elevate.git
-```
-
-or
-
-```bash
-git clone git@github.com:SolidLabResearch/elevate.git
-```
-
-The new mono-repo including the desktop app is on `develop` branch. So checkout/track this branch to build the desktop app:
-
-```bash
-cd ./elevate
-git checkout --track origin/develop
-```
-
-Then install npm dependencies:
-
-```bash
-npm install
-```
-
-Run solution tests (`appcore` + `desktop`):
-
-```bash
-npm test
-```
-
-(_Should be executed with success for any pull request submission_).
-
-#### Start the other services
-
-Start Loama to provide the UI for policies:
-```bash
-cd ..
-git clone https://github.com/maartyman/loama
-cd loama
-npm install
-npm run dev
-```
-
-Start the Solid server and auth server:
-```bash
-cd ..
-git clone https://github.com/maartyman/user-managed-access
-cd user-managed-access #original-uma
-npm install
-npm run start
-```
-
-Start the fill pod web UI to upload some FIT files to your pod:
-```bash
-cd ./fill-pod-web/
-npm run fill-pod:web
-```
-
-Start the aggregator server to convert FIT files to RDF and write them back to the pod:
-```bash
-cd ./aggregator/
-npm run build && npm run start
-```
-
-#### Desktop development environment
-
-All commands displayed in this section will be executed in `./desktop/` folder. So:
-
-```bash
-cd ./desktop/
-```
-
-- Run in development:
-
-```bash
-npm start
-```
-
-> This npm task will create a `./desktop/dist` output folder and re-compile both `appcore` and `desktop` projects on any code changes
-
-To open the desktop app, open another terminal, then run:
-
-```bash
-npm run launch:dev:app
-```
-
-- Run unit tests:
-
-```bash
-npm test
-```
-
-- Generate production installers per platform:
-
-First switch to desktop directory with `cd desktop/`
-
-- Build `Windows` `x64` `.exe`:
-
-  ```bash
-  npm run build:package:win
-  ```
-
-- Build `Linux` `x64` `.deb`:
-
-  ```bash
-  npm run build:package:linux
-  ```
-
-- Build `MacOS` `x64` `.dmg` :
-
-  ```bash
-  npm run build:package:mac
-  ```
-
-> Output installers will be located in `./desktop/package/`
-> The build targets are defined in `./desktop/package.json` (`build` key section). See [https://www.electron.build](https://www.electron.build) for more info.
-
-- (Optional) To sign the production installers read the [how to sign appendix](#sign-application)
-
-- (Optional) To publish the production installers on github read the [how to publish on github appendix](#publish-to-github-releases)
-
-- Clean outputs:
-
-```bash
-npm run clean
-```
 
 ## Solid OIDC Client Metadata
 

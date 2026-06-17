@@ -148,7 +148,7 @@ describe("ActivityMapping round-trip", () => {
       }) as any
     );
 
-    const count = await mapping.query(["http://rs.local:3000/alice/activities/"], { type: "count" });
+    const count = await mapping.query(["http://localhost:3000/alice/activities/"], { type: "count" });
 
     expect(count).toBe(0);
   });
@@ -162,8 +162,8 @@ describe("ActivityMapping round-trip", () => {
       }) as any
     );
 
-    await expect(mapping.query(["http://rs.local:3000/alice/profile"], { type: "count" })).rejects.toThrow(
-      "Failed to load RDF source http://rs.local:3000/alice/profile: 404 Not Found"
+    await expect(mapping.query(["http://localhost:3000/alice/profile"], { type: "count" })).rejects.toThrow(
+      "Failed to load RDF source http://localhost:3000/alice/profile: 404 Not Found"
     );
   });
 

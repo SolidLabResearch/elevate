@@ -5,7 +5,7 @@ const { URL } = require("url");
 
 const DEFAULT_PORT = Number(process.env.PORT || 4317);
 const DEFAULT_HOST = process.env.HOST || "127.0.0.1";
-const DEFAULT_ISSUER_URL = process.env.SOLID_ISSUER_URL || "http://rs.local:3000";
+const DEFAULT_ISSUER_URL = process.env.SOLID_ISSUER_URL || "http://localhost:3000";
 const CLIENT_ID_URL = process.env.SOLID_CLIENT_ID_URL || null;
 const PUBLIC_DIR = path.join(__dirname, "public");
 const LOGO_PATH = path.join(__dirname, "../resources/elevate_logo.svg");

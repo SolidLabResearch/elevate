@@ -40,7 +40,7 @@ let fileStates = [];
 let uploading = false;
 let handlingAuth = false;
 let config = {
-  defaultIssuerUrl: "http://rs.local:3000",
+  defaultIssuerUrl: "http://localhost:3000",
   clientIdUrl: `${window.location.origin}/client-id.jsonld`
 };
 

@@ -10,10 +10,10 @@ npm run fill-pod:web
 
 Then open the printed local URL, log in with your Solid issuer, choose one or more FIT files, or generate random FIT files in the browser, and upload them. The UI uses the same `trustflows-client` login package as the main application and derives the pod root from the logged-in WebID.
 
-The default issuer is `http://rs.local:3000`; override it with:
+The default issuer is `http://localhost:3000`; override it with:
 
 ```bash
-SOLID_ISSUER_URL=http://rs.local:3000 npm run fill-pod:web
+SOLID_ISSUER_URL=http://localhost:3000 npm run fill-pod:web
 ```
 
 By default the local server exposes a client identifier document at `/client-id.jsonld` for the current local URL. To use another client identifier:
