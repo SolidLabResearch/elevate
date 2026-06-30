@@ -27,7 +27,7 @@ This creates the data vault server, IdP server, and authorization server for:
 
 Start Loama to provide the UI for policies in another terminal:
 ```bash
-git clone https://github.com/maartyman/loama
+git clone --branch elevate-demo https://github.com/maartyman/loama
 cd loama
 npm install
 npm run dev
